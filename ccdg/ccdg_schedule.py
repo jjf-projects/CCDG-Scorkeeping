@@ -1,0 +1,183 @@
+# python & 3rd party
+import os
+from datetime import date, datetime, timedelta
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select, func
+# custom modules
+import sql_db.database as database
+from sql_db.models import Schedule, Score, Division
+import google_apis.google_tasks as g
+import logger.logger as logger
+
+
+'''
+ccdg_schedule.py
+
+A module for working with schedules via the CCDG Weekly CSV Scoring Utility.
+    The whole thing hangs on schedules, so this module is at the heart of the system.
+    The schedule is a list of periods - each with a date, course, layout, cycle and 
+    **critically**, a link to the UDisc event.  The schedule is read from a Google Sheet
+    which only league admins can edit. Example:
+    https://docs.google.com/spreadsheets/d/1tv5N3r0F82Oo6zAYBG8i9Xh13mRnbrDXshkTRj73cVE/edit?gid=259080292#gid=259080292
+'''
+
+
+def update_schedule (config: dict, db: sessionmaker) -> None:
+
+    # settings
+    g_creds = config.G_SVC_CREDS_FILE
+    sched = config.G_SCHEDULE
+    dt_format = config.DT_FORMAT
+
+    # update divisions in the database - TO:DO only if settings changed
+    populate_divisions(db, config.DIVISIONS)
+
+    # check if we need to update the schedule
+    schedule_rows = db.query(func.count(Schedule.period)).scalar()  # always returns an int
+    if schedule_rows > 0:
+        # compare last update to schedule vs db so we only do this when we need
+        last_update_db =database.get_db_last_update()
+        last_update_schedule = g.get_gdrivefile_metadata(g_creds, sched['file_id'], 'modifiedDate')
+        last_update_schedule = datetime.strptime(last_update_schedule, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
+
+    if (last_update_schedule > last_update_db) or (schedule_rows == 0):
+
+        #read schedule
+        schedule_rows = g.read_gsheet_range(g_creds, sched)
+        
+        # clear existing schedule recs
+        db.query(Schedule).delete()
+        db.commit()
+        
+        # loop new rows and insert in schedule table - watch types
+        for r in schedule_rows:
+            
+            # format date
+            dt_monday = datetime.strptime(r[1], dt_format['spreadsheet'])
+
+            # deal w/ empty urls if the udisc event is not set up
+            try:
+                evt_url = r[7]
+            except IndexError:
+                evt_url = None
+
+            new_p = Schedule(
+                period = int(r[0]),
+                monday = dt_monday,
+                course = r[2],
+                layout = r[3],
+                travel = bool(r[4]),
+                cycle = int(r[6]),
+                event_url = evt_url
+            )
+            db.add(new_p)
+        db.commit()
+    logger.log("Schedule updated", "info")
+    return
+        
+
+def populate_divisions(db: sessionmaker, division_list: list) -> None:
+    '''
+    Populate the divisions table with the divisions defined in the settings file.
+
+    This is a one-time operation to set up the database with the divisions.
+    It should be run only once, or when the divisions change.
+
+    Args
+        db (Session): SQLAlchemy session.
+        division_list (list): List of divisions that should exsist in the database
+                            in the order that they should be presented in the standings
+
+    '''
+
+    # clear existing divisions recs
+    db.query(Division).delete()
+    db.commit()
+
+    # loop new rows and insert new divisions
+    for i in range(len(division_list)):
+        d = division_list[i]
+        new_d = Division(
+            div_name = d,
+            display_order = i+1
+        )
+        db.add(new_d)
+    db.commit()
+    
+
+def get_unscored_periods(db: sessionmaker, date_format_db: str) -> list:
+    """
+    Finds periods that are complete, but unscored in the database.
+
+    Args:
+        session (Session): SQLAlchemy session.
+
+    Returns:
+        list: List of schedule periods that need scoring.
+    """
+    # Find the latest scored period
+    max_scored_period = db.execute(select(func.max(Score.period))).scalar()
+    if max_scored_period is None:
+        max_scored_period = 0  # If no scores exist, assume we start from 0
+
+    # Get a list of all periods that need scoring
+    today = datetime.today().date()
+    unscored_periods = []
+
+    schedule_periods = db.execute(select(Schedule.period, Schedule.monday)).all()
+
+    for period, monday in schedule_periods:
+        # Convert monday (string) to a date object if necessary
+        if isinstance(monday, str):
+            monday = datetime.strptime(monday, date_format_db).date()
+        
+        # Find the next Sunday
+        sunday = monday + timedelta(days=(6 - monday.weekday()))  # Monday is 0, Sunday is 6
+        
+        # Check if the Sunday has passed and period is not scored yet
+        if sunday < today and period > max_scored_period:
+            unscored_periods.append(period)
+
+    return unscored_periods
+
+def get_current_cycle(db: sessionmaker):
+    """
+    Retrieves the most recent cycle from the Schedule table based on today's date.
+
+    Args:
+        db_session (Session): Active SQLAlchemy session.
+
+    Returns:
+        int or None: The current cycle number, or None if no valid cycle is found.
+    """
+    today = date.today()
+
+    query = select(Schedule.cycle).where(
+        Schedule.monday <= today  # Find the most recent Monday before or on today
+        ).order_by(Schedule.monday.desc()).limit(1)  # Get the latest valid period
+
+    result = db.execute(query).scalar_one_or_none()
+       
+    return result  # Returns the cycle number or None if no valid data exists
+
+def get_min_max_periods_for_cycle(db: sessionmaker, cycle: int):
+    """
+    Retrieves the minimum and maximum periods for a given cycle from the Schedule table.
+
+    Args:
+        db_session (Session): Active SQLAlchemy session.
+        cycle (int): The cycle number to filter by.
+
+    Returns:
+        tuple: (min_period, max_period) or (None, None) if no records found.
+    """
+    query = select(
+        func.min(Schedule.period).label("min_period"),
+        func.max(Schedule.period).label("max_period")
+    ).where(Schedule.cycle == cycle)
+
+    result = db.execute(query).one_or_none()
+    return result if result else (None, None)  # Handle case where no data is found
+
+
+pass
