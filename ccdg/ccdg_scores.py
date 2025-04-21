@@ -8,7 +8,7 @@ from urllib.parse import urlparse, urlunparse
 # custom libs
 from sql_db.models import Schedule, Score, HoleScore, Player, PlayerDivision, Division
 from ccdg import ccdg_players
-import logger.logger as logger
+from logger.logger import logger_gen as logger
 
 
 '''
@@ -47,7 +47,7 @@ def fetch_xlsx_as_dicts(url: str):
     except Exception as e:
         msg = f"Error fetching file from URL: {url}"
         print(msg)
-        logger.logger.error(msg)
+        logger.error(msg)
         return []
 
 def get_udsic_scores(db: session, period: int) -> dict:
@@ -122,12 +122,13 @@ def clean_score_data(score_rows: list) -> dict:
 def add_scores(db: session, period: int, score_rows: list) -> None:
     '''
     '''
+    print(f"Adding scores for period {period}...")
     for row in score_rows:
         # get player_id from db
         player_id = ccdg_players.get_player_id_by_name(db, row['name'])
         if not player_id:
-            msg = f"Player {row['name']} not found in database."
-            print(msg)
+            msg = f"Unregistered Player: {row['name']}"
+            logger.warning(msg)
             continue
 
         # check if score already exists for this period
@@ -203,7 +204,9 @@ def check_existing_score(db_session, player_id, period):
     ).scalar_one_or_none()
 
     if existing_score:
-        print(f"Score already exists for player_id {player_id} in period {period}.")
+        msg = f"Score already exists for player_id {player_id} in period {period}."
+        print(msg)
+        logger.warning(msg)
         return True
     return False
 

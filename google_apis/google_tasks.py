@@ -6,7 +6,7 @@ from io import BytesIO
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 import gspread
-import logger.logger as logger
+from logger.logger import logger_gen as logger
 
 
 '''
@@ -45,7 +45,7 @@ def __auth_g_drive__(creds_file: str) -> GoogleDrive:
         drive = GoogleDrive(auth=gauth)
     except RuntimeError as err:
         msg = f'Error authenticating via pyDrive. \n{err}\n Did you configure in settings?  Are the creds valid?'
-        logger.log(msg, error=True)
+        logger.error(msg)
         raise Exception(msg)
 
     return drive
@@ -145,14 +145,16 @@ def add_file_to_gdrive(creds_file:str, local_file: str, to_folder_id: str) -> No
         except:
             msg = f'error adding "{local_f_basename}" to GDrive folder {to_folder_id}'
             logger.error(msg)
+
     try:
         file = gdrive.CreateFile(metadata=metadata)
         file.SetContentFile(local_file)  
         file.Upload()
-        logger.info(f'{local_file} uploaded to gDrive folder for safe keeping')
+        msg = f'{local_file} uploaded to gDrive folder for safe keeping'
+        logger.info(msg)
     except Exception as e:
         msg = f'error adding "{local_f_basename}" to GDrive folder {to_folder_id}\n\t{e}'
-        print(msg)
+        logger.error(msg)
     return
 
 ### gSpread ###
@@ -171,7 +173,7 @@ def __auth_g_sheets__(creds_file: str) -> gspread.service_account:
         gc = gspread.service_account(filename=creds_file)
     except RuntimeError as err:
         msg = f'gSpread auth failed. \n{err} \n Did you configure in settings?  Are the creds valid?'
-        logger.ERROR(msg)
+        logger.error(msg)
         raise Exception(msg)
     
     return gc
@@ -200,6 +202,7 @@ def read_gsheet_range(creds_file: str, gSpread_detail: dict) -> list:
     except PermissionError:
         msg = "Did you grant the service user permissions on the GFrive files & folders? ccdg-google-service-account@ccdg-csv-utility.iam.gserviceaccount.com"
         print(msg)
+        logger.error(msg)
     wksht = gsheet.get_worksheet_by_id(wksht_id)
     data = wksht.get(rng)
     

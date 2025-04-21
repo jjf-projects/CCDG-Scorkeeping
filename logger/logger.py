@@ -20,12 +20,12 @@ from datetime import datetime
 
 # https://blog.muya.co.ke/configuring-multiple-loggers-python/
 
-LOG_DIR = os.path.join(os.getcwd() ,'logs')
+LOG_DIR = os.path.join(os.path.abspath(__file__), ".." ,'logs')
 LOG_FORMAT = ("%(asctime)s [%(levelname)s] - %(message)s ")
 LOG_LEVEL = logging.INFO
 DT_FORMAT = '%Y-%m-%d'
 GENERAL_LOG_FILE = os.path.join(LOG_DIR, f'{datetime.now().strftime(DT_FORMAT)}.log')
-#PLAYERS_LOG_FILE =  os.path.join(LOG_DIR, 'PLAYERS.log')
+
 
 if not os.path.exists(LOG_DIR):
     os.mkdir(LOG_DIR)

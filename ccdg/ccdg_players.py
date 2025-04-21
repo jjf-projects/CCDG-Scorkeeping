@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from sql_db.models import Player, PlayerDivision, Division
 from ccdg import ccdg_schedule
-import logger.logger as logger
+from logger.logger import logger_gen as logger
 
 '''
 ccdg_players.py

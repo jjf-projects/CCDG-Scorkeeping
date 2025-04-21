@@ -1,6 +1,4 @@
 # python and 3rd party modules
-from os.path import join
-from statistics import mean
 from sqlalchemy import select, func
 from sqlalchemy.orm import session
 
@@ -8,7 +6,7 @@ from sqlalchemy.orm import session
 from sql_db.models import Score, Schedule
 from ccdg import ccdg_scores, ccdg_schedule
 import google_apis.google_tasks as g
-import logger.logger as logger
+from logger.logger import logger_gen as logger
 
 '''
 ccdg_standings.py
@@ -28,7 +26,7 @@ def generate_standings(db: session, player_registration: list, cfg: dict) -> Non
     # how may periods dictates how many cols we will need
     periods_elapsed = db.execute(select(func.max(Score.period))).scalar_one_or_none()
     curr_cycle = ccdg_schedule.get_current_cycle(db) # in case of more than one week to process
-    
+
     
     ## Scores sheet ##
 
@@ -39,7 +37,8 @@ def generate_standings(db: session, player_registration: list, cfg: dict) -> Non
     # remove unpaid players from the published results 
     #   note: their scores are still kept in the DB - just need to update the sheet from cfg.G_REGISTRATION
     unpaid_players = [p.get("UDisc Full Name") for p in player_registration if p.get("Payable Status") != "paid"]
-    logger.info(f"Unpaid players: {unpaid_players}")
+    for p in unpaid_players:
+        logger.warning(f"Unpaid player: {p}")
     score_rows = [row for row in score_rows if row[0] not in unpaid_players]
 
     # Get the header rows for the scores sheet & add scores below

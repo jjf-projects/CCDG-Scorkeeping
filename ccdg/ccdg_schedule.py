@@ -1,13 +1,13 @@
 # python & 3rd party
 import os
 from datetime import date, datetime, timedelta
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 # custom modules
 import sql_db.database as database
 from sql_db.models import Schedule, Score, Division
 import google_apis.google_tasks as g
-import logger.logger as logger
+from logger.logger import logger_gen as logger
 
 
 '''
@@ -22,61 +22,61 @@ A module for working with schedules via the CCDG Weekly CSV Scoring Utility.
 '''
 
 
-def update_schedule (config: dict, db: sessionmaker) -> None:
+def update_schedule (db: Session, exe_folder: str, config: dict) -> None:
 
     # settings
-    g_creds = config.G_SVC_CREDS_FILE
+    g_creds = os.path.join(exe_folder, config.G_SVC_CREDS_FILE)
     sched = config.G_SCHEDULE
     dt_format = config.DT_FORMAT
+    
+    # local function
+    def update_schedule_table(db: Session, g_creds: str, sched: dict, dt_format: dict) -> None:
 
-    # update divisions in the database - TO:DO only if settings changed
-    populate_divisions(db, config.DIVISIONS)
-
-    # check if we need to update the schedule
-    schedule_rows = db.query(func.count(Schedule.period)).scalar()  # always returns an int
-    if schedule_rows > 0:
-        # compare last update to schedule vs db so we only do this when we need
-        last_update_db =database.get_db_last_update()
-        last_update_schedule = g.get_gdrivefile_metadata(g_creds, sched['file_id'], 'modifiedDate')
-        last_update_schedule = datetime.strptime(last_update_schedule, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
-
-    if (last_update_schedule > last_update_db) or (schedule_rows == 0):
-
-        #read schedule
+        # Read schedule
         schedule_rows = g.read_gsheet_range(g_creds, sched)
-        
-        # clear existing schedule recs
+
+        # Clear existing schedule records
         db.query(Schedule).delete()
         db.commit()
-        
-        # loop new rows and insert in schedule table - watch types
+
+        # Loop through new rows and insert into schedule table
         for r in schedule_rows:
-            
-            # format date
+            # Format date
             dt_monday = datetime.strptime(r[1], dt_format['spreadsheet'])
 
-            # deal w/ empty urls if the udisc event is not set up
-            try:
-                evt_url = r[7]
-            except IndexError:
-                evt_url = None
+            # Handle empty URLs if the UDisc event is not set up
+            evt_url = r[7] if len(r) > 7 else None
 
             new_p = Schedule(
-                period = int(r[0]),
-                monday = dt_monday,
-                course = r[2],
-                layout = r[3],
-                travel = bool(r[4]),
-                cycle = int(r[6]),
-                event_url = evt_url
+                period=int(r[0]),
+                monday=dt_monday,
+                course=r[2],
+                layout=r[3],
+                travel=bool(r[4]),
+                cycle=int(r[6]),
+                event_url=evt_url
             )
             db.add(new_p)
         db.commit()
-    logger.log("Schedule updated", "info")
+        logger.info("Schedule updated")
+
+    # check if we need to update the schedule
+    schedule_row_count = db.query(func.count(Schedule.period)).scalar()  # always returns an int
+    if schedule_row_count == 0:
+        update_schedule_table(db, g_creds, sched, dt_format)
+    else:
+        # compare last update to schedule vs db so we only do this when we need
+        last_update_db = database.get_db_last_update(db)
+        last_update_schedule = g.get_gdrivefile_metadata(g_creds, sched['file_id'], 'modifiedDate')
+        last_update_schedule = datetime.strptime(last_update_schedule, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
+
+        if (last_update_schedule > last_update_db):
+             update_schedule_table(db, g_creds, sched, dt_format)
+
+
     return
         
-
-def populate_divisions(db: sessionmaker, division_list: list) -> None:
+def populate_divisions(db: Session, division_list: list) -> None:
     '''
     Populate the divisions table with the divisions defined in the settings file.
 
@@ -104,8 +104,7 @@ def populate_divisions(db: sessionmaker, division_list: list) -> None:
         db.add(new_d)
     db.commit()
     
-
-def get_unscored_periods(db: sessionmaker, date_format_db: str) -> list:
+def get_unscored_periods(db: Session, date_format_db: str) -> list:
     """
     Finds periods that are complete, but unscored in the database.
 
@@ -140,7 +139,7 @@ def get_unscored_periods(db: sessionmaker, date_format_db: str) -> list:
 
     return unscored_periods
 
-def get_current_cycle(db: sessionmaker):
+def get_current_cycle(db: Session):
     """
     Retrieves the most recent cycle from the Schedule table based on today's date.
 
@@ -160,7 +159,7 @@ def get_current_cycle(db: sessionmaker):
        
     return result  # Returns the cycle number or None if no valid data exists
 
-def get_min_max_periods_for_cycle(db: sessionmaker, cycle: int):
+def get_min_max_periods_for_cycle(db: Session, cycle: int):
     """
     Retrieves the minimum and maximum periods for a given cycle from the Schedule table.
 

@@ -1,12 +1,12 @@
 # python & 3rd party modules
-import time, os, traceback
+import time, os, traceback, sys
 
 # custom modules
 import ccdg_settings as config
 from sql_db import database
 from ccdg import ccdg_schedule, ccdg_scores, ccdg_players, ccdg_standings
 import google_apis.google_tasks as g
-import logger.logger as logger
+from logger.logger import logger_gen as logger
 
 '''
 ccdg__main_app.py
@@ -14,11 +14,15 @@ ccdg__main_app.py
 '''
 
 # load settings as collection of constants - see ccdg_settings.py
-# CONFIG = config.Configuration(config.Settings_2025_dev)
-CONFIG = config.Configuration(config.Settings_2025_dev)  # uncomment for Dev/Testing
+DEV_MODE = False
+if DEV_MODE:
+    CONFIG = config.Configuration(config.Settings_2025_dev)
+    logger.info("Running in DEV mode")
+else:
+    CONFIG = config.Configuration(config.Settings_2025)
+    logger.info("Running in PROD mode")
 
- 
-def main():
+def main(exe_dir: str = os.path.dirname(os.path.abspath(__file__))) -> None:
     '''
     Main function to run the CCDG Weekly CSV Scoring Utility.
     This function orchestrates the loading of data, processing of scores,
@@ -27,12 +31,14 @@ def main():
     '''
 
     # use the same db session throughout - see sql_db/database.py
-    db = database.init_db(CONFIG.DATABASE)
+    db_file_path = os.path.join(exe_dir, CONFIG.DATABASE['DB_DIR'], CONFIG.DATABASE['DB_NAME'])
+    db = database.init_db(db_file_path, CONFIG.DATABASE['ECHO']) # get a db sessio
+    ccdg_schedule.populate_divisions(db, CONFIG.DIVISIONS) # Create/update division table
     
     ####  L O A D   D B  ####
 
     # Insert schedule updates into the database
-    ccdg_schedule.update_schedule(CONFIG, db) 
+    ccdg_schedule.update_schedule(db, exe_dir, CONFIG) 
 
     # load latest registration data from google sheets
     player_registration = g.read_gsheet_range(CONFIG.G_SVC_CREDS_FILE, CONFIG.G_REGISTRATION)
@@ -42,7 +48,7 @@ def main():
     for player in player_registration:
         player['UDisc Full Name'] = ccdg_players.clean_player_name(player['UDisc Full Name'])
 
-    # add players to db - note this will add any new player who registered since last run
+    # add players to db - this will add any new player who registered since last run
     new_names = ccdg_players.add_new_players(db, player_registration)
 
     # create player division associations for new players from registration data
@@ -63,18 +69,16 @@ def main():
 
         # add scores to db
         ccdg_scores.add_scores(db, period, clean_scores)
-        
-        pass
 
     # having processed all the scores, we are done inserting to the db. Copy sqlite file to gdrive for posterity
-    db_path = os.path.join(CONFIG.DATABASE['DB_DIR'], CONFIG.DATABASE['DB_NAME'])
+    db_path = os.path.join(os.path.abspath(__file__), CONFIG.DATABASE['DB_DIR'], CONFIG.DATABASE['DB_NAME'])
     g.add_file_to_gdrive(CONFIG.G_SVC_CREDS_FILE, db_path, CONFIG.G_DATA_LOGS)
 
     # generate standindgs
     ccdg_standings.generate_standings(db, player_registration, CONFIG)
 
     # copy logs to GDrive too
-    
+
 
     return None
 
@@ -87,15 +91,14 @@ if __name__ == "__main__":
 
     start_time = time.time()
     fname = os.path.basename(__file__)
-    start_msg = f'### START ###\r\n:{fname} started'
-    if hasattr(CONFIG, 'CONFIG_NAME'):
-        start_msg += f' with settings: {CONFIG.CONFIG_NAME}'
+    start_msg = f'### START ###  - {fname}'
+    print(start_msg)
     logger.info(start_msg)
 
     try:
         main()
         elapsed_time = time.time() - start_time
-        msg = f"\r\n### END ###--- {fname} completed sucessfully in {elapsed_time:.3f} seconds ---\n"
+        msg = f"### END ###--- {fname} completed sucessfully in {elapsed_time:.3f} seconds ---\n"
     except Exception as e:
         stack_trace_str = traceback.format_exc()
         msg = f' ---- EXECUTION ERROR  -----\n{e}\n{stack_trace_str}'

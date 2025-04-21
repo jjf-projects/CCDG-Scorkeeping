@@ -9,11 +9,9 @@ Scorekeeping tools customized for and by [Chester County Disc Golf](https://www.
 ## TO DO:
 
 **Code**
-* log unpaid plyrs
-* essential logging
 * test automation
 * db to GDrive
-* files to Gdrive
+* logs files to Gdrive
 
 **Write this doc**
 * succession planning

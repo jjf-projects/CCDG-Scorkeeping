@@ -4,11 +4,9 @@ from statistics import mean
 import traceback
 
 import ccdg_settings
-import ccdg_scores
-import ccdg_standings
-import database.db_utils as db_utils
+from ccdg import ccdg_players, ccdg_schedule, ccdg_scores, ccdg_standings
 import google_apis.google_tasks as g
-from logger.logger import logger_players
+from logger.logger import logger_gen as logger  
 
 '''
 ccdg_sidehatch.py contains smaller scripts useful for semi-regular one-off tasks.
