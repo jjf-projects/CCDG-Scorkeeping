@@ -1,6 +1,6 @@
 # python & 3rd party
-from sqlalchemy import select, func
-from sqlalchemy.orm import session, aliased
+from sqlalchemy import select, func, or_, delete
+from sqlalchemy.orm import Session, aliased
 import requests
 import pandas as pd
 from io import BytesIO
@@ -21,8 +21,39 @@ A module with utility functions for working with scores in the CCDG Weekly CSV S
 
 ### IMPORT ###
 
+import pandas as pd
+import os
+import logging
 
-def fetch_xlsx_as_dicts(url: str):
+logger = logging.getLogger(__name__)
+
+def load_local_xlsx_as_dicts(file_path: str):
+    """
+    Loads an Excel (.xlsx) file from a local file path and returns data as a list of dictionaries.
+
+    Args:
+        file_path (str): The path to the .xlsx file on the local drive.
+
+    Returns:
+        list: A list of dictionaries representing the spreadsheet data.
+    """
+    try:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # Read the Excel file into a Pandas DataFrame
+        df = pd.read_excel(file_path)
+
+        # Convert DataFrame to a list of dictionaries
+        return df.to_dict(orient="records")
+
+    except Exception as e:
+        msg = f"Error reading file from path: {file_path} — {str(e)}"
+        print(msg)
+        logger.error(msg)
+        return []
+
+def fetch_web_xlsx_as_dicts(url: str):
     """
     Fetches an Excel (.xlsx) file from a given URL and returns data as a list of dictionaries.
 
@@ -50,21 +81,43 @@ def fetch_xlsx_as_dicts(url: str):
         logger.error(msg)
         return []
 
-def get_udsic_scores(db: session, period: int) -> dict:
+def get_udsic_scores(db: Session, period: int) -> dict:
+    '''
+    Fetches UDisc scores for a given period from the database and returns them as a dictionary.
+    
+    Args:
+        db (Session): Active SQLAlchemy Session.
+        period (int): The period number to fetch scores for.
+    Returns:
+        dict: A dictionary containing the period and a list of leaderboard rows.
+        Each row is a dictionary with player scores and details.
+    Raises:
+        Exception: If the period is not found in the schedule or if there is an error fetching the scores.
+    '''
 
     # get schedule details for the period
     sched_period_data = db.execute(select(Schedule).where(Schedule.period == period)).scalar()
 
-    # get the data score data
+    # get the score data    
+        # - if url is null try local_file, use that instead of fetching from the web 
+        # - see: https://docs.google.com/document/d/1M1CVz6wZ5GF-qIN2Q_5neGg64oaPHecThHo-7JwlVtg/edit?tab=t.0
+        # be sure to set loca_file to None if you want to fetch from the web after a player's choice week
     url = sched_period_data.event_url
-
-    # parse defalt event url to get an export - see https://forum.udisc.com/t/request-public-api/375/28
-    parsed_url = urlparse(url) 
-    new_path = parsed_url.path.rstrip('/') + "/export"  # Ensure path ends with "/export"
-    url_export = urlunparse((parsed_url.scheme, parsed_url.netloc, new_path, '', '', ''))
+    if url:
+        # parse defalt event url to get an export - see https://forum.udisc.com/t/request-public-api/375/28
+        parsed_url = urlparse(url) 
+        if not parsed_url:
+            logger.error(f"Invalid URL found for wk {period}: {url}")
+            logger.error(f"Check the sheet and/or Schedule table in the database.")
+            return {}
+        new_path = parsed_url.path.rstrip('/') + "/export"  # Ensure path ends with "/export"
+        url_export = urlunparse((parsed_url.scheme, parsed_url.netloc, new_path, '', '', ''))
+        event_results = fetch_web_xlsx_as_dicts(url_export)
+    else:
+        local_file = None #r"D:\Code\CCDG\CCDG-Scorkeeping2025\temp\chester-county-disc-golf-ccdg-weekly-league-tyler-east-playerChoice-2025-10-13.xlsx"
+        event_results = load_local_xlsx_as_dicts(local_file)
     
-    # return a dict w/ wkNo and score data
-    event_results = fetch_xlsx_as_dicts(url_export)
+    # return a dict w/ wkNo and score data    
     if event_results:
         return {
             'period': period,
@@ -119,7 +172,7 @@ def clean_score_data(score_rows: list) -> dict:
 
     return score_rows
 
-def add_scores(db: session, period: int, score_rows: list) -> None:
+def add_scores(db: Session, period: int, score_rows: list) -> None:
     '''
     '''
     print(f"Adding scores for period {period}...")
@@ -145,7 +198,7 @@ def add_score_entry(db, player_id, period, score_data):
     Adds a new score entry and associated hole scores to the database.
 
     Args:
-        db_session: The database session to execute queries.
+        db_Session: The database Session to execute queries.
         player: The player object containing player_id.
         period: The period number for the score entry.
         score_data: A dictionary containing score details, including event_total_score, 
@@ -183,12 +236,12 @@ def add_score_entry(db, player_id, period, score_data):
     db.commit()
     return
     
-def check_existing_score(db_session, player_id, period):
+def check_existing_score(db_Session, player_id, period):
     """
     Checks if a score entry already exists for a given player, period, and season.
 
     Args:
-        db_session: The database session to execute queries.
+        db_Session: The database Session to execute queries.
         player_id: The player table value for player_id.
         period: The period number to check.
         season: The season number to check.
@@ -196,7 +249,7 @@ def check_existing_score(db_session, player_id, period):
     Returns:
         bool: True if the score entry exists, False otherwise.
     """
-    existing_score = db_session.execute(
+    existing_score = db_Session.execute(
         select(Score).where(
             (Score.player_id == player_id) &
             (Score.period == period)
@@ -213,19 +266,68 @@ def check_existing_score(db_session, player_id, period):
 
 # ### READ DB ###
 
-def get_player_scores_by_period(db: session) -> list:
+def get_player_scores_all_periods_by_player_id(db: Session, player_ids: list) -> list:
     """
     Fetches all player scores for the given season, pivoting periods into columns.
 
     Args:
-        db_session (Session): Active SQLAlchemy session.
+        db_Session (Session): Active SQLAlchemy Session.
+        player_ids (int): a list of ids to include in the output
+
+    Returns:
+        list where each row is a list like [name, division, score1, score2, ..]
+    """
+       
+    # Get all distinct periods scored in the season - from the db
+    periods = db.execute(
+        select(Score.period).distinct().order_by(Score.period)
+    ).scalars().all()
+
+    # Dynamically build case statements to fetch relative_score for each period
+    period_cases = [
+        func.coalesce(
+            select(Score.relative_score)
+            .where((Score.player_id == Player.player_id) & (Score.period == period))
+            .correlate(Player)
+            .scalar_subquery(),
+            None
+        ).label(f"wk{period}")
+        for period in periods
+    ]
+
+    # Final query including player_id, name, and all period scores
+    query = (
+        select(Player.player_id, Player.full_name, *period_cases)
+        .distinct()
+        .join(Score, isouter=True)
+    )
+    player_scores_all_periods = db.execute(query).all() # returns [player_id, player_name, wk1_score, wk2_score,...]
+
+    # assemble final rows adding division for each player
+    score_rows = []
+    for player_id, full_name, *scores in player_scores_all_periods:
+        division = None
+        if player_id in player_ids:
+            score_rows.append([player_id, full_name, division, *scores])
+
+    return score_rows # list
+
+def get_player_scores_all_periods(db: Session) -> list:
+    """
+    Fetches all player scores for the given season, pivoting periods into columns.
+    Note: 
+     - These scores are used to assign points for the standings, the data come from the relative_score column in the Score table, 
+     - which comes from'event_relative_score' in the UDisc export  See the new_score varuable in add_score_entry() above for full details.
+
+    Args:
+        db_Session (Session): Active SQLAlchemy Session.
         season (int): The season to retrieve scores for.
 
     Returns:
         list where each row is a list like [name, division, score1, score2, ..]
     """
        
-    # Get all distinct periods in the season - from the db
+    # Get all distinct periods scored in the season - from the db
     periods = db.execute(
         select(Score.period).distinct().order_by(Score.period)
     ).scalars().all()
@@ -256,11 +358,11 @@ def get_player_scores_by_period(db: session) -> list:
         division = get_player_current_division(db, player_id) or "Unknown"  # Default if no division found
         score_rows.append([full_name, division, *scores])
 
-    # filter out scores for non-registered players
+    #note: filtering out scores for non-registered players is done in ccdg_standings.generate_standings()
 
     return score_rows # list
 
-def get_player_current_division(db_session, player_id):
+def get_player_current_division(db_Session, player_id):
     # Get the most recent period
     max_period_subquery = select(func.max(Score.period)).scalar_subquery()
 
@@ -280,8 +382,95 @@ def get_player_current_division(db_session, player_id):
         .limit(1)
     )
 
-    result = db_session.execute(query).scalar()
+    result = db_Session.execute(query).scalar()
     return result  # Returns the division name or None if not found
 
-### R E T I R E
+def get_player_division_for_one_period(db_Session, player_id, target_period):
+    """
+    Get the division for a player for a specific period.
+    
+    Args:
+        db_Session (Session): Active SQLAlchemy Session.
+        player_id (int): The ID of the player.
+        period (int): The period to check.
+
+    Returns:
+        str: The division name or None if not found.
+    """
+    query = (
+        select(Division.div_name)
+        .join(PlayerDivision, Division.division_id == PlayerDivision.division_id)
+        .where(
+            PlayerDivision.player_id == player_id,
+            PlayerDivision.valid_from_period <= target_period,
+            or_(
+                PlayerDivision.valid_to_period == None,
+                PlayerDivision.valid_to_period >= target_period
+            )
+        )
+        .order_by(PlayerDivision.valid_from_period.desc())
+        .limit(1)
+    )
+
+    result = db_Session.execute(query).scalar_one_or_none()
+    return result  # Returns the division name or None if not found
+
+def avg_non_zero_vals(vals: list) -> float:
+    """
+    Calculate the average of non-zero values from a list.
+
+    Args:
+        scores (list): A list of values.
+
+    Returns:
+        float: The average of non-zero values, rounded to 3 decimal places.
+    """
+    non_zero = [pts for pts in vals if pts!= 0]
+    avg = sum(non_zero) / len(non_zero) if non_zero else 0
+    avg = round(avg, 3)
+    return avg
+
+
+### OTHER FUNCTIONS ###
+def delete_scores_for_period(db: Session, period: int):
+    """
+    Deletes all scores and their associated hole scores for a given period.
+    
+    Args:
+        Session (Session): SQLAlchemy Session object.
+        period (int): The period for which scores should be deleted.
+    
+    SQL Commands:
+        -- Step 1: Delete from hole_score where the score is in period 11
+        DELETE FROM hole_score
+        WHERE score_id IN (
+            SELECT score_id FROM score WHERE period = 11
+        );
+
+        -- Step 2: Delete from score for period 11
+        DELETE FROM score
+        WHERE period = 11;
+
+    """
+    from sql_db.models import Score, HoleScore  # Import models here to avoid circular imports
+
+    # Step 1: Find all Score IDs for the specified period
+    score_ids = db.scalars(
+        select(Score.score_id).where(Score.period == period)
+    ).all()
+
+    # Step 2: Delete HoleScores linked to those Score IDs
+    if score_ids:
+        db.execute(
+            delete(HoleScore).where(HoleScore.score_id.in_(score_ids))
+        )
+
+        # Step 3: Delete the Scores themselves
+        db.execute(
+            delete(Score).where(Score.score_id.in_(score_ids))
+        )
+
+        # Commit the changes
+        db.commit()
+        logger.warning(f"Deleted scores and hole scores for period {period}.")
 pass

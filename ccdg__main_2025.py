@@ -3,7 +3,7 @@ import time, os, traceback, sys
 
 # custom modules
 import ccdg_settings as config
-from sql_db import database
+from sql_db import ccdg_db
 from ccdg import ccdg_schedule, ccdg_scores, ccdg_players, ccdg_standings
 import google_apis.google_tasks as g
 from logger.logger import logger_gen as logger
@@ -14,7 +14,7 @@ ccdg__main_app.py
 '''
 
 # load settings as collection of constants - see ccdg_settings.py
-DEV_MODE = False
+DEV_MODE = 0    # 0 == prod; 1 == dev
 if DEV_MODE:
     CONFIG = config.Configuration(config.Settings_2025_dev)
     logger.info("Running in DEV mode")
@@ -32,10 +32,8 @@ def main(exe_dir: str = os.path.dirname(os.path.abspath(__file__))) -> None:
 
     # use the same db session throughout - see sql_db/database.py
     db_file_path = os.path.join(exe_dir, CONFIG.DATABASE['DB_DIR'], CONFIG.DATABASE['DB_NAME'])
-    db = database.init_db(db_file_path, CONFIG.DATABASE['ECHO']) # get a db sessio
+    db = ccdg_db.init_db(db_file_path, CONFIG.DATABASE['ECHO']) # get a db session
     ccdg_schedule.populate_divisions(db, CONFIG.DIVISIONS) # Create/update division table
-    
-    ####  L O A D   D B  ####
 
     # Insert schedule updates into the database
     ccdg_schedule.update_schedule(db, exe_dir, CONFIG) 
@@ -64,14 +62,16 @@ def main(exe_dir: str = os.path.dirname(os.path.abspath(__file__))) -> None:
         # get uDisc exports for that period's data
         period_data = ccdg_scores.get_udsic_scores(db, period)
 
-        # clean up score rows
-        clean_scores = ccdg_scores.clean_score_data(period_data['leaderboard_rows'])
-
-        # add scores to db
-        ccdg_scores.add_scores(db, period, clean_scores)
+        # clean up score rows & add to db
+        leaderboard_rows = period_data['leaderboard_rows']
+        if not leaderboard_rows:
+            logger.warning(f"No scores found for period {period}. Skipping. Has the schedule sheet been updated to include the uDisc link?")
+        else:   
+            clean_scores = ccdg_scores.clean_score_data(period_data['leaderboard_rows'])
+            ccdg_scores.add_scores(db, period, clean_scores)
 
     # having processed all the scores, we are done inserting to the db. Copy sqlite file to gdrive for posterity
-    db_path = os.path.join(os.path.abspath(__file__), CONFIG.DATABASE['DB_DIR'], CONFIG.DATABASE['DB_NAME'])
+    db_path = os.path.join(exe_dir, CONFIG.DATABASE['DB_DIR'], CONFIG.DATABASE['DB_NAME']) + '.db'
     g.add_file_to_gdrive(CONFIG.G_SVC_CREDS_FILE, db_path, CONFIG.G_DATA_LOGS)
 
     # generate standindgs
@@ -95,13 +95,14 @@ if __name__ == "__main__":
     print(start_msg)
     logger.info(start_msg)
 
+    msg = "### END ### "
     try:
         main()
         elapsed_time = time.time() - start_time
-        msg = f"### END ###--- {fname} completed sucessfully in {elapsed_time:.3f} seconds ---\n"
+        msg = f"{msg}--- {fname} completed sucessfully in {elapsed_time:.3f} seconds ---\n"
     except Exception as e:
         stack_trace_str = traceback.format_exc()
-        msg = f' ---- EXECUTION ERROR  -----\n{e}\n{stack_trace_str}'
+        msg = f' ---- EXECUTION ERROR  -----\n{e}\n{stack_trace_str}\n{e} ### END ### ---{fname} \n'
     finally:
         logger.info(msg)
         print(msg)

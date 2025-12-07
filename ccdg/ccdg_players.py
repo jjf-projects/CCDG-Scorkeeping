@@ -3,8 +3,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy import select
 
-
 from sql_db.models import Player, PlayerDivision, Division
+import google_apis.google_tasks as g
 from ccdg import ccdg_schedule
 from logger.logger import logger_gen as logger
 
@@ -55,6 +55,16 @@ def add_new_players(db: Session, player_data: list) -> list:
     return new_player_names
 
 def associate_divisions(db: Session, reg_data: list, new_players: list, cycle: int):
+    '''
+    Associates players with divisions based on the registration data and cycle.
+    Args:
+        db (Session): SQLAlchemy database session.      
+        reg_data (list): List of dictionaries representing players as defined in registration.
+        new_players (list): List of player names to associate with divisions.
+        cycle (int): The cycle number for which to associate divisions.
+    Returns:
+        None    
+    '''
 
     # get the min & max periods for the cycle
     min_period, max_period = ccdg_schedule.get_min_max_periods_for_cycle(db, cycle)
@@ -103,6 +113,29 @@ def associate_divisions(db: Session, reg_data: list, new_players: list, cycle: i
     return
 
 ## Utility functions ##
+
+def get_valid_player_ids(db: Session, g_creds_file: str, g_reg_info:object) -> list:
+    '''
+    Returns a list of player_ids for those who should be included in the reults.
+      * checks against the gSheet for registration data
+      * player names in this list will match what in the ccdg_db Player table 
+    '''
+    # load latest registration data from google sheets
+    player_registration = g.read_gsheet_range(g_creds_file, g_reg_info)
+    player_registration = g.list_to_dict(player_registration)
+
+    player_ids = []
+    for p in player_registration:
+        if p.get("Payable Status") == "paid":
+            player_name = clean_player_name(p.get('UDisc Full Name'))
+            p_id = get_player_id_by_name(db, player_name)
+            if p_id is not None:
+                player_ids.append(p_id)
+            else:
+                logger.warning(f"Player {player_name} not found in database.")
+        else:
+            logger.warning(f"Unpaid player: {p.get('UDisc Full Name')}")
+    return player_ids
 
 def get_player_id_by_name(db: Session, player_name: str) -> Player:
         """
@@ -176,8 +209,62 @@ def update_player_division(
         db.rollback()
         return f"Error updating division: {e}"
 
+def update_player_udisc_name(
+    db: Session,
+    player_id: int,
+    new_udisc_name: str
+):
+    """Update a player's UDisc name."""
+    try:
+        player = db.query(Player).filter(Player.player_id == player_id).one()
+        player.udisc_name = new_udisc_name
+        db.commit()
+        return f"Player {player_id} updated with new UDisc name: {new_udisc_name}"
+    except NoResultFound:
+        return f"Player {player_id} not found"
+    except Exception as e:
+        db.rollback()
+        return f"Error updating UDisc name: {e}"
 
+def get_player_division_for_period(
+    db: Session,
+    player_id: int,
+    period: int
+) -> str:
+    """Get the player's division for a specific period."""
+    try:
+        division = (
+            db.query(Division.div_name)
+            .join(PlayerDivision)
+            .filter(PlayerDivision.player_id == player_id)
+            .filter(
+                (PlayerDivision.valid_from_period <= period) &
+                ((PlayerDivision.valid_to_period == None) | (PlayerDivision.valid_to_period >= period))
+            )
+            .one()
+        )
+        return division.div_name
+    except NoResultFound:
+        return "Unknown"
+    except Exception as e:
+        logger.error(f"Error retrieving division for player {player_id} in period {period}: {e}")
+        return "no player matched"
 
-
+def get_division_defs(db: Session) -> list:
+    """
+    Get a list of all divisions in the database.
+    
+    Args:
+        db (Session): SQLAlchemy database session.
+    
+    Returns:
+        list: List of division names.
+    """
+    try:
+        divisions = db.execute(select(Division.div_name, Division.division_id, Division.display_order)).all()
+        return divisions
+    except Exception as e:
+        logger.error(f"Error retrieving divisions: {e}")
+        return []
 pass
 

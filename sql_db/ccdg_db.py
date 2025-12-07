@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, sessionmaker
 # custom
 from sql_db.models import Base
 from logger.logger import logger_gen as logger
-from logger.logger import delete_log_files
+
 
 # Make this a Class
 
@@ -24,9 +24,6 @@ def init_db(db_path: str, echo: bool = False) -> Session:
     
     # Create a session factory
     SessionLocal = sessionmaker(bind=engine)
-
-    # if all that worked, clear the logs - we are starting fresh
-    delete_log_files()
 
     return SessionLocal()
 

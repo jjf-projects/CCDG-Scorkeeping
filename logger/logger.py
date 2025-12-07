@@ -20,7 +20,7 @@ from datetime import datetime
 
 # https://blog.muya.co.ke/configuring-multiple-loggers-python/
 
-LOG_DIR = os.path.join(os.path.abspath(__file__), ".." ,'logs')
+LOG_DIR = os.path.join(os.path.abspath(__file__), ".." ,"..",'logs')
 LOG_FORMAT = ("%(asctime)s [%(levelname)s] - %(message)s ")
 LOG_LEVEL = logging.INFO
 DT_FORMAT = '%Y-%m-%d'

@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 # custom modules
-import sql_db.database as database
+import sql_db.ccdg_db as ccdg_db
 from sql_db.models import Schedule, Score, Division
 import google_apis.google_tasks as g
 from logger.logger import logger_gen as logger
@@ -61,17 +61,20 @@ def update_schedule (db: Session, exe_folder: str, config: dict) -> None:
         logger.info("Schedule updated")
 
     # check if we need to update the schedule
-    schedule_row_count = db.query(func.count(Schedule.period)).scalar()  # always returns an int
-    if schedule_row_count == 0:
-        update_schedule_table(db, g_creds, sched, dt_format)
-    else:
-        # compare last update to schedule vs db so we only do this when we need
-        last_update_db = database.get_db_last_update(db)
-        last_update_schedule = g.get_gdrivefile_metadata(g_creds, sched['file_id'], 'modifiedDate')
-        last_update_schedule = datetime.strptime(last_update_schedule, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
+    update_schedule_table(db, g_creds, sched, dt_format)
 
-        if (last_update_schedule > last_update_db):
-             update_schedule_table(db, g_creds, sched, dt_format)
+    # Note: The following code is commented out because it is too brittle - a smarter check would be to see if we have compete data for weeks to process.
+    # schedule_row_count = db.query(func.count(Schedule.period)).scalar()  # always returns an int
+    # if schedule_row_count == 0:
+    #     update_schedule_table(db, g_creds, sched, dt_format)
+    # else:
+    #     # compare last update to schedule vs db so we only do this when we need
+    #     last_update_db = ccdg_db.get_db_last_update(db)
+    #     last_update_schedule = g.get_gdrivefile_metadata(g_creds, sched['file_id'], 'modifiedDate')
+    #     last_update_schedule = datetime.strptime(last_update_schedule, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
+
+    #     if (last_update_schedule > last_update_db):
+    #          update_schedule_table(db, g_creds, sched, dt_format)
 
 
     return
@@ -149,7 +152,7 @@ def get_current_cycle(db: Session):
     Returns:
         int or None: The current cycle number, or None if no valid cycle is found.
     """
-    today = date.today()
+    today = date.today() - timedelta(days=1)  #-1 because we want to get the last completed cycle and this usually runs on a Monday of the new week
 
     query = select(Schedule.cycle).where(
         Schedule.monday <= today  # Find the most recent Monday before or on today

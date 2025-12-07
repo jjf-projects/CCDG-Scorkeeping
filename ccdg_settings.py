@@ -1,15 +1,15 @@
-import os
+import os, copy
 
 '''
 json dicts to support different configurations as an easy-to-configure and portable object. 
-This takes the place of constants in the code.
-Types and capitalization matter!  Explainer:
+This takes the place of constants in the code. Types and capitalization matter!  
+Explainer:
 
     Google                      # creds and locations of data in google drive 
         G_SVC_CREDS_FILE        # path to the service credentials.  read more:  https://docs.google.com/document/d/1obuwpJykyDmwbKyDOIOFzF-EHP-qpMCDVK81Q01vock/edit
         G_DATA_FOLDER           # must contain subfolders for inbox, processed, logs. Example: https://drive.google.com/drive/u/0/folders/1R3f1zJ-Cx15d7thgIEtzSTntZKB60flJ
-        G_REGISTRATION    # the id of a google sheet with a column particular format - see readme.md
-        G_SCHEDULE        # the id of a google sheet with a column particular format - see readme.md
+        G_REGISTRATION          # the id of a google sheet with a column particular format - see readme.md
+        G_SCHEDULE              # the id of a google sheet with a column particular format - see readme.md
             .file_id            # str 
             .sheet_id           # int
             .range              # string - standard spreadsheet notation eg. "A1:B2"
@@ -40,9 +40,7 @@ Types and capitalization matter!  Explainer:
 
 '''
 
-# devinbox - 1otLA2dVEHQmO4c6Hx2gTMik_u5owmjhZ
-# devInbox2 - 1re5LZQSHOBog9orNzWe59S5VlIYj2k5u
-
+# PRODUCTION Settings for the 2025 season
 Settings_2025 = {
 
     'G_SVC_CREDS_FILE': '.\\google_apis\\google_creds_svc_acct.json',
@@ -81,47 +79,24 @@ Settings_2025 = {
         'spreadsheet': '%d-%b-%Y'}
 }
 
-
-
-Settings_2025_dev = {
-
-    'G_SVC_CREDS_FILE': '.\\google_apis\\google_creds_svc_acct.json',
-    'G_DATA_LOGS': '1PdwBFcbzBJs5-cHoQKRnuV2xe4Pm_wEP',
-    'G_REGISTRATION': {
-        'file_id': '1tYkb03aoEYGeYqpKHQN-UGtEx39-YY44oKPIJaexcCs',
-        'sheet_id': '2104782840',
-        'range': 'A:K'},
-    'G_SCHEDULE': {
-        'file_id': '1tv5N3r0F82Oo6zAYBG8i9Xh13mRnbrDXshkTRj73cVE',
-        'sheet_id': '259080292',
-        'range': 'A2:H'}, 
-    'G_STANDINGS': {
+# DEVELOPMENT Settings for the 2025 season in development mode
+Settings_2025_dev = copy.deepcopy(Settings_2025)
+Settings_2025_dev['DATABASE'] = {
+        'DB_DIR': '.\\sql_db',          
+        'DB_NAME': '2025_dev.db',
+        'ECHO': True}
+Settings_2025_dev['G_STANDINGS'] = {
         'file_id': '1D3JFjvyokhD__0jvvFb9EdWaXkL5GD53BXH62Wd9QTg',
         'score_sheet': 0,
         'points_sheet': 2139620093,
-        'weekly_avg_pts': 24541006},
-
-    'SEASON': 2025,           
-    'DIVISIONS': ['PRO', 'AAA','BBB', 'CCC', 'DDD', 'EEE'], 
-    'LEAD_COLS_SCORES' : ['Name', "Division"],
-    'LEAD_COLS_POINTS' : ['Name', 'Division', 'Total Points Cycle', 'Points After Drops Cycle'],
-    'SCORING':{
-        "percentage_modifier": 120,
-        "score_based_modifier": 30,
-        "cycle_len": 12,
-        "keep_periods": 8}, 
-    
-    'DATABASE': {
-        'DB_DIR': '.\\sql_db',          
-        'DB_NAME': '2025_dev.db',
-        'ECHO': True},
-
-    'DT_FORMAT': {
-        'database': '%Y-%m-%d',
-        'spreadsheet': '%d-%b-%Y'}
-}
+        'weekly_avg_pts': 24541006
+    }
 
 
+
+### Configuration class to hold settings as an object
+# This class allows us to access settings as attributes, e.g., config.G_SVC_CREDS_FILE
+# It is initialized with a dictionary of settings, which can be easily modified or extended.
 class Configuration:
     # must be initialized with a a dict of values - see above
     def __init__(self, settings_dict):

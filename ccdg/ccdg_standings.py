@@ -3,7 +3,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import session
 
 # custom modules
-from sql_db.models import Score, Schedule
+from sql_db.models import Score, Schedule, Division
 from ccdg import ccdg_scores, ccdg_schedule
 import google_apis.google_tasks as g
 from logger.logger import logger_gen as logger
@@ -31,10 +31,10 @@ def generate_standings(db: session, player_registration: list, cfg: dict) -> Non
     ## Scores sheet ##
 
     # get a list of score table rows for all players and periods so far; sort by most recent week
-    score_rows =ccdg_scores.get_player_scores_by_period(db) 
+    score_rows =ccdg_scores.get_player_scores_all_periods(db) 
     score_rows = sorted(score_rows, key=lambda x: x[-1] if x[-1] is not None else float('inf'))
 
-    # remove unpaid players from the published results 
+    # remove unpaid players from the published results - ** note there is a new function in ccdg_players.py to get a list of valid players
     #   note: their scores are still kept in the DB - just need to update the sheet from cfg.G_REGISTRATION
     unpaid_players = [p.get("UDisc Full Name") for p in player_registration if p.get("Payable Status") != "paid"]
     for p in unpaid_players:
@@ -126,7 +126,7 @@ def create_header_rows(db: session, lead_cols: list, date_format: str) -> list:
 
     return [period_row, monday_row, course_row]
 
-def tally_totals(season_points: list, cur_cycle: int, cycle_len: int, keep_periods: int) -> dict:
+def tally_totals(season_points: list, cycle: int, cycle_len: int, keep_periods: int) -> dict:
     ''' 
     Calculate total points and points-after-drops for a single player at a time
 
@@ -135,12 +135,14 @@ def tally_totals(season_points: list, cur_cycle: int, cycle_len: int, keep_perio
         cycle_len: periods in an award cycle
         keep_periods: the periods that count toward pts-after-drops
     Returns:
-        dict w/ 2 keys
+        dict w/ 2 keys:
+        'points_total'
+        'points_after_drops'
     '''
 
     # add points from dict into an easy-to-sum list
     
-    start_index = (cur_cycle - 1) * cycle_len  # Calculate start index
+    start_index = (cycle - 1) * cycle_len  # Calculate start index
     end_index = end_index = min(start_index + cycle_len, len(season_points))
     vals_to_tally = season_points[start_index:end_index]  # Extract the relevant scores
      
@@ -180,6 +182,7 @@ def get_period_avg_points(rows_points:list):
     avg_pt_rows_sorted.insert(0, ['Player', 'Division', 'Weekly Avg Points']) 
     
     return avg_pt_rows_sorted
+
 
 ###  Point systems  ###
 
@@ -248,6 +251,25 @@ def percentage_plus_Marnie(period_scores, scoring_modifiers: dict):
     [r.pop(1) for r in period_scores]
 
     return period_scores
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## Deprecated or never used ##
 
