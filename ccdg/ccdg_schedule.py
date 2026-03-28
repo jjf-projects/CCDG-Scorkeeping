@@ -42,18 +42,20 @@ def update_schedule (db: Session, exe_folder: str, config: dict) -> None:
         # Loop through new rows and insert into schedule table
         for r in schedule_rows:
             # Format date
-            dt_monday = datetime.strptime(r[1], dt_format['spreadsheet'])
+            dt_saturday = datetime.strptime(r[1], dt_format['spreadsheet'])
+            dt_sunday = datetime.strptime(r[2], dt_format['spreadsheet'])
 
             # Handle empty URLs if the UDisc event is not set up
-            evt_url = r[7] if len(r) > 7 else None
+            evt_url = r[8] if len(r) > 8 else None
 
             new_p = Schedule(
                 period=int(r[0]),
-                monday=dt_monday,
-                course=r[2],
-                layout=r[3],
-                travel=bool(r[4]),
-                cycle=int(r[6]),
+                saturday=dt_saturday,
+                sunday=dt_sunday,
+                course=r[3],
+                layout=r[4],
+                travel=bool(r[5]),
+                cycle=int(r[7]),
                 event_url=evt_url
             )
             db.add(new_p)
@@ -126,15 +128,12 @@ def get_unscored_periods(db: Session, date_format_db: str) -> list:
     today = datetime.today().date()
     unscored_periods = []
 
-    schedule_periods = db.execute(select(Schedule.period, Schedule.monday)).all()
+    schedule_periods = db.execute(select(Schedule.period, Schedule.sunday)).all()
 
-    for period, monday in schedule_periods:
-        # Convert monday (string) to a date object if necessary
-        if isinstance(monday, str):
-            monday = datetime.strptime(monday, date_format_db).date()
-        
-        # Find the next Sunday
-        sunday = monday + timedelta(days=(6 - monday.weekday()))  # Monday is 0, Sunday is 6
+    for period, sunday in schedule_periods:
+        # Convert sunday (string) to a date object if necessary
+        if isinstance(sunday, str):
+            sunday = datetime.strptime(sunday, date_format_db).date()
         
         # Check if the Sunday has passed and period is not scored yet
         if sunday < today and period > max_scored_period:
@@ -155,8 +154,8 @@ def get_current_cycle(db: Session):
     today = date.today() - timedelta(days=1)  #-1 because we want to get the last completed cycle and this usually runs on a Monday of the new week
 
     query = select(Schedule.cycle).where(
-        Schedule.monday <= today  # Find the most recent Monday before or on today
-        ).order_by(Schedule.monday.desc()).limit(1)  # Get the latest valid period
+        Schedule.sunday <= today  # Find the most recent Sunday before or on today
+        ).order_by(Schedule.sunday.desc()).limit(1)  # Get the latest valid period
 
     result = db.execute(query).scalar_one_or_none()
        

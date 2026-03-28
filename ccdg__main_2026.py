@@ -16,10 +16,10 @@ ccdg__main_app.py
 # load settings as collection of constants - see ccdg_settings.py
 DEV_MODE = 0    # 0 == prod; 1 == dev
 if DEV_MODE:
-    CONFIG = config.Configuration(config.Settings_2025_dev)
+    CONFIG = config.Configuration(config.Settings_2026_dev)
     logger.info("Running in DEV mode")
 else:
-    CONFIG = config.Configuration(config.Settings_2025)
+    CONFIG = config.Configuration(config.Settings_2026)
     logger.info("Running in PROD mode")
 
 def main(exe_dir: str = os.path.dirname(os.path.abspath(__file__))) -> None:
@@ -47,11 +47,11 @@ def main(exe_dir: str = os.path.dirname(os.path.abspath(__file__))) -> None:
         player['UDisc Full Name'] = ccdg_players.clean_player_name(player['UDisc Full Name'])
 
     # add players to db - this will add any new player who registered since last run
-    new_names = ccdg_players.add_new_players(db, player_registration)
+    ccdg_players.add_new_players(db, player_registration)
 
-    # create player division associations for new players from registration data
+    # create player division associations for any player missing one for this cycle
     current_cycle = ccdg_schedule.get_current_cycle(db)
-    ccdg_players.associate_divisions(db, player_registration, new_names, current_cycle)
+    ccdg_players.associate_divisions(db, player_registration, current_cycle)
 
     # determine which periods need processing
     periods_to_score = ccdg_schedule.get_unscored_periods(db, CONFIG.DT_FORMAT['database'])

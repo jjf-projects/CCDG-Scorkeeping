@@ -54,60 +54,63 @@ def add_new_players(db: Session, player_data: list) -> list:
     # Return the names of new players
     return new_player_names
 
-def associate_divisions(db: Session, reg_data: list, new_players: list, cycle: int):
+def associate_divisions(db: Session, reg_data: list, cycle: int):
     '''
     Associates players with divisions based on the registration data and cycle.
+    Processes all players in reg_data, skipping any who already have a division
+    assigned for this cycle. Safe to call on every run.
+
     Args:
-        db (Session): SQLAlchemy database session.      
+        db (Session): SQLAlchemy database session.
         reg_data (list): List of dictionaries representing players as defined in registration.
-        new_players (list): List of player names to associate with divisions.
         cycle (int): The cycle number for which to associate divisions.
     Returns:
-        None    
+        None
     '''
 
     # get the min & max periods for the cycle
     min_period, max_period = ccdg_schedule.get_min_max_periods_for_cycle(db, cycle)
 
     # cycle column in the registration data
-    cycle_col_name = f'C{str(cycle)} Division' # e.g., C1 Division, C2 Division, etc.
+    cycle_col_name = f'C{str(cycle)} Div' # e.g., C1 Division, C2 Division, etc.
 
     # get divs and IDs
     divisions = db.execute(select(Division.div_name, Division.division_id)).all()
 
-    # loop through new players and add PlayerDivision associations
-    for player_name in new_players:
-        
-        # Find the player's division in the registration data
-        player_reg_row = [p for p in reg_data if p['UDisc Full Name'] == player_name]
+    # get player IDs that already have a division assignment for this cycle
+    existing_assignments = {
+        row[0] for row in db.execute(
+            select(PlayerDivision.player_id).where(
+                PlayerDivision.valid_from_period == min_period
+            )
+        ).all()
+    }
 
-        if player_reg_row:
-            if len(player_reg_row) > 1:
-                logger.warning(f"WARNING: Multiple rows found for player {player_name}. Using the first one.")
-            player_reg_row = player_reg_row[0]
-            try:
-                division = player_reg_row[cycle_col_name] # e.g., "PRO", "AAA", etc.
-                #if you get and err ^ here - make sure the schedule is populated
-            except Exception as e:
-                print(f"TIP: Looks like the schedule did not get added to db.  Check timings - see ccdg_schedule.py ln 30 \r\n{e}")
-                raise e
-        else:
-            pass # player not found in registration data
+    # loop through all players in registration and add missing PlayerDivision associations
+    for player_reg_row in reg_data:
+        player_name = player_reg_row.get('UDisc Full Name')
 
-        # get new player id from name
+        try:
+            division = player_reg_row.get(cycle_col_name)    # e.g., "Alpha", "Bravo", etc.
+        except KeyError as e:
+            raise e
+
         player_id = get_player_id_by_name(db, player_name)
+
+        if player_id in existing_assignments:
+            continue  # already assigned for this cycle
+
         division_id = next((value for key, value in divisions if key == division), None)
-        
+
         if player_id and division_id:
-            # Create a new PlayerDivision instance and add it to the session
             new_division = PlayerDivision(
                 player_id = player_id,
                 division_id = division_id,
-                valid_from_period = min_period, 
+                valid_from_period = min_period,
                 valid_to_period = max_period)
             db.add(new_division)
         else:
-            logger.error(f'Error: Player ID or Division ID not found for {player_name} (id={player_id}, div={division_id})')
+            logger.error(f'Error: Player ID or Division ID not found for {player_name} (player_id={player_id}, division="{division}", division_id={division_id})')
 
     db.commit()
     return

@@ -40,38 +40,38 @@ Explainer:
 
 '''
 
-# PRODUCTION Settings for the 2025 season
-Settings_2025 = {
+# PRODUCTION Settings for the 2026 season
+Settings_2026 = {
 
     'G_SVC_CREDS_FILE': '.\\google_apis\\google_creds_svc_acct.json',
     'G_DATA_LOGS': '1GFtj5pVNacVuv_GaaZnujMXFgNRzUpcr',
     'G_REGISTRATION': {
-        'file_id': '1tYkb03aoEYGeYqpKHQN-UGtEx39-YY44oKPIJaexcCs',
-        'sheet_id': '2104782840',
-        'range': 'A:K'},
+        'file_id': '1K41qy6rIkwUwtuD6McyZnmdSy3qqtMcHQVuRrAl02hw',
+        'sheet_id': '1313108348',
+        'range': 'A:F'},
     'G_SCHEDULE': {
-        'file_id': '10dcoUkMyd9GwKTZb2RrW6qX1EgRGgN5lDY-NabftAlg',
+        'file_id': '1kLxB3cCzuvkYZL3aQFePDQX4DPOSq0mpxPLRw2YOGw0',
         'sheet_id': '259080292',
-        'range': 'A2:H'}, 
+        'range': 'A2:I'}, 
     'G_STANDINGS': {
-        'file_id': '1TeDuilz8Clf50uT3GXzTeLbqj8tTzGrbwyHHSga9qSE',
+        'file_id': '1zRQHjAxyHQzS2zkMAoMjmK3mDJRRbf_qGGDXIUjKWpc',
         'score_sheet': 0,
         'points_sheet': 2139620093,
         'weekly_avg_pts': 24541006},
 
-    'SEASON': 2025,           
-    'DIVISIONS': ['PRO', 'AAA','BBB', 'CCC', 'DDD', 'EEE'], 
+    'SEASON': 2026,           
+    'DIVISIONS': ["Alpha", "Bravo", "Charlie", "Delta", "Echo"],
     'LEAD_COLS_SCORES' : ['Name', "Division"],
     'LEAD_COLS_POINTS' : ['Name', 'Division', 'Total Points Cycle', 'Points After Drops Cycle'],
     'SCORING':{
         "percentage_modifier": 120,
         "score_based_modifier": 30,
         "cycle_len": 12,
-        "keep_periods": 8}, 
+        "keep_periods": 6}, 
     
     'DATABASE': {
         'DB_DIR': '.\\sql_db',          
-        'DB_NAME': '2025.db',
+        'DB_NAME': '2026.db',
         'ECHO': False},
 
     'DT_FORMAT': {
@@ -79,13 +79,13 @@ Settings_2025 = {
         'spreadsheet': '%d-%b-%Y'}
 }
 
-# DEVELOPMENT Settings for the 2025 season in development mode
-Settings_2025_dev = copy.deepcopy(Settings_2025)
-Settings_2025_dev['DATABASE'] = {
+# DEVELOPMENT Settings for the 2026 season in development mode
+Settings_2026_dev = copy.deepcopy(Settings_2026)
+Settings_2026_dev['DATABASE'] = {
         'DB_DIR': '.\\sql_db',          
-        'DB_NAME': '2025_dev.db',
+        'DB_NAME': '2026_dev.db',
         'ECHO': True}
-Settings_2025_dev['G_STANDINGS'] = {
+Settings_2026_dev['G_STANDINGS'] = {
         'file_id': '1D3JFjvyokhD__0jvvFb9EdWaXkL5GD53BXH62Wd9QTg',
         'score_sheet': 0,
         'points_sheet': 2139620093,

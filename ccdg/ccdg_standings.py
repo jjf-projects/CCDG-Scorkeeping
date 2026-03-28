@@ -114,17 +114,17 @@ def create_header_rows(db: session, lead_cols: list, date_format: str) -> list:
     """
     # Fetch all distinct periods and related schedule data
     schedule_data = db.execute(
-        select(Schedule.period, Schedule.monday, Schedule.course)
+        select(Schedule.period, Schedule.saturday, Schedule.course)
         .order_by(Schedule.period)
     ).all()
 
     # Extract data into three header rows
     lead_cols_epmty = [""] * len(lead_cols)
     period_row = lead_cols_epmty + [str(row.period) for row in schedule_data]
-    monday_row = lead_cols_epmty + [row.monday.strftime('%d-%b') if row.monday else "" for row in schedule_data]
+    saturday_row = lead_cols_epmty + [row.saturday.strftime('%d-%b') if row.saturday else "" for row in schedule_data]
     course_row = lead_cols + [row.course or "" for row in schedule_data]
 
-    return [period_row, monday_row, course_row]
+    return [period_row, saturday_row, course_row]
 
 def tally_totals(season_points: list, cycle: int, cycle_len: int, keep_periods: int) -> dict:
     ''' 

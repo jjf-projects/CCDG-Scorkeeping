@@ -8,7 +8,8 @@ class Schedule(Base):
     __tablename__ = "schedule"
 
     period = Column(Integer, primary_key=True)
-    monday = Column(Date)
+    saturday = Column(Date)
+    sunday = Column(Date)
     course = Column(String)
     layout = Column(String)
     travel = Column(Boolean)
