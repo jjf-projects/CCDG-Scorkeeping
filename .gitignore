@@ -1,13 +1,9 @@
 .vscode/
-__pycache__/
-logger/__pycache__/
-sql_db/__pycache__/
+**/__pycache__/
 sql_db/*.db
-google/__pycache__/
-cc/__pycache__/
-.gitignore
 .venv/
 logs/
 google_apis/google_creds_svc_acct.json
+.env
 temp/
 

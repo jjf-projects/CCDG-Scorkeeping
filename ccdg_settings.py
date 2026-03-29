@@ -1,4 +1,14 @@
-import os, copy
+import os
+import copy
+from dotenv import load_dotenv
+
+# Load .env from the repo root (sits next to this file).
+# Values in .env override the defaults below.
+# .env is gitignored
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+
+# Absolute path to the repo root — used to build all other paths.
+_HERE = os.path.dirname(os.path.abspath(__file__))
 
 '''
 json dicts to support different configurations as an easy-to-configure and portable object. 
@@ -43,7 +53,10 @@ Explainer:
 # PRODUCTION Settings for the 2026 season
 Settings_2026 = {
 
-    'G_SVC_CREDS_FILE': '.\\google_apis\\google_creds_svc_acct.json',
+    'G_SVC_CREDS_FILE': os.environ.get(
+        'CCDG_CREDS_FILE',
+        os.path.join(_HERE, 'google_apis', 'google_creds_svc_acct.json'),
+    ),
     'G_DATA_LOGS': '1GFtj5pVNacVuv_GaaZnujMXFgNRzUpcr',
     'G_REGISTRATION': {
         'file_id': '1K41qy6rIkwUwtuD6McyZnmdSy3qqtMcHQVuRrAl02hw',
@@ -70,19 +83,30 @@ Settings_2026 = {
         "keep_periods": 6}, 
     
     'DATABASE': {
-        'DB_DIR': '.\\sql_db',          
+        'DB_DIR': os.path.join(_HERE, 'sql_db'),
         'DB_NAME': '2026.db',
         'ECHO': False},
 
     'DT_FORMAT': {
         'database': '%Y-%m-%d',
-        'spreadsheet': '%d-%b-%Y'}
+        'spreadsheet': '%d-%b-%Y'},
+
+    # Gemini model used for weekly social media summaries.
+    # gemini-2.0-flash-lite is the lightest available model — best choice for
+    # the free tier.  Run regenerate_summary(dry_run=True) to check token usage.
+    # See: https://ai.google.dev/gemini-api/docs/models
+    'GEMINI_MODEL': 'gemini-3-flash-preview',
+
+    # How many players per division to include in the Gemini prompt.
+    # Keeping this small reduces token usage on the free tier.
+    # 3 gives Gemini enough context (winner, runner-up, 3rd) for a good summary.
+    'GEMINI_SUMMARY_TOP_N': 10,
 }
 
 # DEVELOPMENT Settings for the 2026 season in development mode
 Settings_2026_dev = copy.deepcopy(Settings_2026)
 Settings_2026_dev['DATABASE'] = {
-        'DB_DIR': '.\\sql_db',          
+        'DB_DIR': os.path.join(_HERE, 'sql_db'),
         'DB_NAME': '2026_dev.db',
         'ECHO': True}
 Settings_2026_dev['G_STANDINGS'] = {
@@ -95,18 +119,26 @@ Settings_2026_dev['G_STANDINGS'] = {
 
 
 ### Configuration class to hold settings as an object
-# This class allows us to access settings as attributes, e.g., config.G_SVC_CREDS_FILE
-# It is initialized with a dictionary of settings, which can be easily modified or extended.
+# Wraps a settings dict and exposes each key as an attribute.
+# All required keys are declared explicitly so a typo or missing entry raises
+# a clear AttributeError at startup rather than failing silently at runtime.
 class Configuration:
-    # must be initialized with a a dict of values - see above
-    def __init__(self, settings_dict):
+    # Required top-level keys — startup fails with a clear error if any are absent.
+    _REQUIRED = {
+        'G_SVC_CREDS_FILE', 'G_DATA_LOGS', 'G_REGISTRATION', 'G_SCHEDULE',
+        'G_STANDINGS', 'SEASON', 'DIVISIONS', 'LEAD_COLS_SCORES',
+        'LEAD_COLS_POINTS', 'SCORING', 'DATABASE', 'DT_FORMAT',
+        'GEMINI_MODEL', 'GEMINI_SUMMARY_TOP_N',
+    }
+
+    def __init__(self, settings_dict: dict):
+        missing = self._REQUIRED - settings_dict.keys()
+        if missing:
+            raise ValueError(f"Settings dict is missing required keys: {missing}")
         self.__dict__.update(settings_dict)
 
     def __getattr__(self, attr):
-        if attr in self.__dict__:
-            return self.__dict__[attr]
-        else:
-            raise AttributeError(f"'Settings' object has no attribute '{attr}'")
+        raise AttributeError(f"Configuration has no attribute '{attr}' — check ccdg_settings.py")
 
 if __name__ == "__main__":
     pass

@@ -1,273 +1,277 @@
-
+# python & 3rd party
 from sqlalchemy.orm import Session
+from sqlalchemy import select, or_
 from sqlalchemy.exc import NoResultFound
-from sqlalchemy import select
-
+# custom
 from sql_db.models import Player, PlayerDivision, Division
 import google_apis.google_tasks as g
 from ccdg import ccdg_schedule
 from logger.logger import logger_gen as logger
 
+
 '''
 ccdg_players.py
 
-A module for working with player data via the CCDG Weekly CSV Scoring Utility.
-    The player table does not contain division.
-    The relationship b/t a player and a division is many-to-many and is managed in the
-    PlayerDivision table so that it may change over time - i.e. after rebalancing.
+Functions for managing players, division assignments, and registration data.
+
+Key design note:
+  Player rows hold identity (name, email) only.
+  Division is stored in PlayerDivision with valid_from/valid_to period ranges,
+  so a player's division can change after each rebalancing cycle without
+  losing historical data.
 '''
 
-## DB Load Functions ##
 
-def add_new_players(db: Session, player_data: list) -> list:
-    """
-    Reads a list of registered players dictionaries and adds only new players to the database.
-    
+# ---------------------------------------------------------------------------
+# REGISTRATION — add players and assign divisions from the registration sheet
+# ---------------------------------------------------------------------------
+
+def add_new_players(db: Session, player_data: list) -> None:
+    """Add players from the registration sheet who are not yet in the Player table.
+
+    Safe to call on every run — existing players are skipped.
+
     Args:
-        session (Session): SQLAlchemy database session.
-        player_data (list): List of dictionaries representing players as defined 
-            in registration (e.g., [{col0: val, col1: val, ...}]).
-    
-    Returns:
-        list: The names of new players in a list
+        db:          Active SQLAlchemy Session.
+        player_data: List of row dicts from the registration Google Sheet.
+                     Must contain 'UDisc Full Name' and 'Email Address' keys.
     """
-    new_players = []
-    new_player_names = []
+    existing_names = {
+        name for (name,) in db.execute(select(Player.full_name)).all()
+    }
 
-    # Get all existing player names
-    existing_names = {name for (name,) in db.execute(select(Player.full_name)).all()}  
+    new_players = [
+        Player(
+            full_name = p['UDisc Full Name'],
+            email     = p.get('Email Address'),
+        )
+        for p in player_data
+        if p.get('UDisc Full Name') not in existing_names
+    ]
 
-    # Iterate through the player data and add new players to the db
-    for player in player_data:        
-        player_name = player.get('UDisc Full Name')
-        if player_name not in existing_names:
-            new_players.append(Player(
-                full_name=player_name,
-                email=player.get("Email Address"))
-                )
-            new_player_names.append(player_name)
-    
     if new_players:
         db.add_all(new_players)
         db.commit()
+        logger.info(f"Added {len(new_players)} new player(s): {[p.full_name for p in new_players]}")
 
-    # Return the names of new players
-    return new_player_names
 
-def associate_divisions(db: Session, reg_data: list, cycle: int):
-    '''
-    Associates players with divisions based on the registration data and cycle.
-    Processes all players in reg_data, skipping any who already have a division
-    assigned for this cycle. Safe to call on every run.
+def associate_divisions(db: Session, reg_data: list, cycle: int) -> None:
+    """Assign divisions to all players who don't yet have one for this cycle.
+
+    Reads the cycle's division column (e.g. 'C1 Div') from the registration
+    sheet and creates a PlayerDivision row for each player missing one.
+    Safe to call on every run — already-assigned players are skipped.
 
     Args:
-        db (Session): SQLAlchemy database session.
-        reg_data (list): List of dictionaries representing players as defined in registration.
-        cycle (int): The cycle number for which to associate divisions.
-    Returns:
-        None
-    '''
-
-    # get the min & max periods for the cycle
+        db:       Active SQLAlchemy Session.
+        reg_data: List of row dicts from the registration Google Sheet.
+        cycle:    Current cycle number (1, 2, or 3).
+    """
     min_period, max_period = ccdg_schedule.get_min_max_periods_for_cycle(db, cycle)
+    if min_period is None:
+        logger.error(f"Cannot associate divisions: no schedule periods found for cycle {cycle}.")
+        return
 
-    # cycle column in the registration data
-    cycle_col_name = f'C{str(cycle)} Div' # e.g., C1 Division, C2 Division, etc.
+    cycle_col = f'C{cycle} Div'   # e.g. 'C1 Div', 'C2 Div'
 
-    # get divs and IDs
-    divisions = db.execute(select(Division.div_name, Division.division_id)).all()
-
-    # get player IDs that already have a division assignment for this cycle
-    existing_assignments = {
-        row[0] for row in db.execute(
+    # Build lookup dicts so we avoid repeated DB queries in the loop
+    division_id_by_name = {
+        name: div_id
+        for name, div_id in db.execute(select(Division.div_name, Division.division_id)).all()
+    }
+    already_assigned = {
+        player_id for (player_id,) in db.execute(
             select(PlayerDivision.player_id).where(
                 PlayerDivision.valid_from_period == min_period
             )
         ).all()
     }
 
-    # loop through all players in registration and add missing PlayerDivision associations
-    for player_reg_row in reg_data:
-        player_name = player_reg_row.get('UDisc Full Name')
+    added = 0
+    for reg_row in reg_data:
+        player_name = reg_row.get('UDisc Full Name')
+        division_name = reg_row.get(cycle_col)
 
-        try:
-            division = player_reg_row.get(cycle_col_name)    # e.g., "Alpha", "Bravo", etc.
-        except KeyError as e:
-            raise e
+        if not division_name:
+            logger.warning(f"No division in column '{cycle_col}' for player '{player_name}' — skipping.")
+            continue
 
         player_id = get_player_id_by_name(db, player_name)
+        if player_id is None:
+            # Player not in DB yet — this shouldn't happen if add_new_players() ran first
+            logger.error(f"Player '{player_name}' not found in the Player table. Run add_new_players() first.")
+            continue
 
-        if player_id in existing_assignments:
-            continue  # already assigned for this cycle
+        if player_id in already_assigned:
+            continue  # already has a division for this cycle
 
-        division_id = next((value for key, value in divisions if key == division), None)
+        division_id = division_id_by_name.get(division_name)
+        if division_id is None:
+            logger.error(
+                f"Division '{division_name}' for player '{player_name}' not found in the Division table. "
+                f"Valid divisions: {list(division_id_by_name.keys())}"
+            )
+            continue
 
-        if player_id and division_id:
-            new_division = PlayerDivision(
-                player_id = player_id,
-                division_id = division_id,
-                valid_from_period = min_period,
-                valid_to_period = max_period)
-            db.add(new_division)
-        else:
-            logger.error(f'Error: Player ID or Division ID not found for {player_name} (player_id={player_id}, division="{division}", division_id={division_id})')
+        db.add(PlayerDivision(
+            player_id         = player_id,
+            division_id       = division_id,
+            valid_from_period = min_period,
+            valid_to_period   = max_period,
+        ))
+        added += 1
 
     db.commit()
-    return
+    logger.info(f"Associated divisions for {added} player(s) in cycle {cycle}.")
 
-## Utility functions ##
 
-def get_valid_player_ids(db: Session, g_creds_file: str, g_reg_info:object) -> list:
-    '''
-    Returns a list of player_ids for those who should be included in the reults.
-      * checks against the gSheet for registration data
-      * player names in this list will match what in the ccdg_db Player table 
-    '''
-    # load latest registration data from google sheets
-    player_registration = g.read_gsheet_range(g_creds_file, g_reg_info)
-    player_registration = g.list_to_dict(player_registration)
+# ---------------------------------------------------------------------------
+# DIVISION LOOKUPS — used by scores, standings, and sidehatch
+# ---------------------------------------------------------------------------
 
-    player_ids = []
-    for p in player_registration:
-        if p.get("Payable Status") == "paid":
-            player_name = clean_player_name(p.get('UDisc Full Name'))
-            p_id = get_player_id_by_name(db, player_name)
-            if p_id is not None:
-                player_ids.append(p_id)
-            else:
-                logger.warning(f"Player {player_name} not found in database.")
-        else:
-            logger.warning(f"Unpaid player: {p.get('UDisc Full Name')}")
-    return player_ids
+def get_player_division_for_period(db: Session, player_id: int, period: int) -> str | None:
+    """Return the division name for a player at a given period, or None if not found.
 
-def get_player_id_by_name(db: Session, player_name: str) -> Player:
-        """
-        Retrieves a player from the database by their full name.
+    This is the single authoritative division lookup used across the codebase.
+    Pass the current period for standings; pass the last period of a cycle for
+    rebalancing / end-of-cycle results.
 
-        Args:
-            db (sessionmaker): SQLAlchemy database session.
-            player_name (str): The full name of the player to retrieve.
+    Args:
+        db:        Active SQLAlchemy Session.
+        player_id: PK from the Player table.
+        period:    The scoring period to look up.
+    """
+    result = db.execute(
+        select(Division.div_name)
+        .join(PlayerDivision, Division.division_id == PlayerDivision.division_id)
+        .where(
+            PlayerDivision.player_id == player_id,
+            PlayerDivision.valid_from_period <= period,
+            or_(
+                PlayerDivision.valid_to_period.is_(None),
+                PlayerDivision.valid_to_period >= period,
+            ),
+        )
+        .order_by(PlayerDivision.valid_from_period.desc())
+        .limit(1)
+    ).scalar_one_or_none()
 
-        Returns:
-            Player: The Player object if found, otherwise None.
-        """
-        player_id = db.execute(
-            select(Player.player_id).where(Player.full_name == player_name).limit(1)
-        ).scalar_one_or_none()
+    return result
 
-        return player_id
-        
-def clean_player_name (name: str) -> str:
-    '''Cleans up player names for consistency in the database'''
-    # remove any quotes
-    name = name.replace('"', '').replace("'", '')
-    # remove @ symbols
-    name = name.replace('@', '')
-    # remove extra spaces and convert to title case
-    name = name.strip().title()
-
-    return name
 
 def update_player_division(
     db: Session,
     player_id: int,
     new_division_id: int,
     valid_from_period: int,
-    valid_to_period: int | None = None
-):
-    """Update a player's division with custom from/to periods."""
-    try:
-        # Find overlapping existing division records
-        overlapping = (
-            db.query(PlayerDivision)
-            .filter(PlayerDivision.player_id == player_id)
-            .filter(
-                (PlayerDivision.valid_to_period == None) | 
-                (PlayerDivision.valid_to_period >= valid_from_period)
-            )
-            .filter(PlayerDivision.valid_from_period <= (valid_to_period or valid_from_period))
-            .all()
-        )
-
-        # Optionally close any overlapping divisions
-        for division in overlapping:
-            division.valid_to_period = valid_from_period - 1
-
-        # Create new division record
-        new_division = PlayerDivision(
-            player_id=player_id,
-            division_id=new_division_id,
-            valid_from_period=valid_from_period,
-            valid_to_period=valid_to_period
-        )
-        db.add(new_division)
-        db.commit()
-
-        return f"Player {player_id} set to division {new_division_id} from period {valid_from_period} to {valid_to_period}"
-
-    except NoResultFound:
-        return f"Player {player_id} not found"
-
-    except Exception as e:
-        db.rollback()
-        return f"Error updating division: {e}"
-
-def update_player_udisc_name(
-    db: Session,
-    player_id: int,
-    new_udisc_name: str
-):
-    """Update a player's UDisc name."""
-    try:
-        player = db.query(Player).filter(Player.player_id == player_id).one()
-        player.udisc_name = new_udisc_name
-        db.commit()
-        return f"Player {player_id} updated with new UDisc name: {new_udisc_name}"
-    except NoResultFound:
-        return f"Player {player_id} not found"
-    except Exception as e:
-        db.rollback()
-        return f"Error updating UDisc name: {e}"
-
-def get_player_division_for_period(
-    db: Session,
-    player_id: int,
-    period: int
+    valid_to_period: int | None = None,
 ) -> str:
-    """Get the player's division for a specific period."""
+    """Change a player's division, closing any overlapping existing assignments.
+
+    Used by sidehatch after rebalancing to apply new cycle division assignments.
+
+    Args:
+        db:               Active SQLAlchemy Session.
+        player_id:        PK from the Player table.
+        new_division_id:  PK from the Division table.
+        valid_from_period: First period the new division applies.
+        valid_to_period:   Last period (inclusive); None means open-ended.
+
+    Returns:
+        A status message string (suitable for logging).
+    """
     try:
-        division = (
-            db.query(Division.div_name)
-            .join(PlayerDivision)
-            .filter(PlayerDivision.player_id == player_id)
-            .filter(
-                (PlayerDivision.valid_from_period <= period) &
-                ((PlayerDivision.valid_to_period == None) | (PlayerDivision.valid_to_period >= period))
+        # Close any existing assignments that overlap with the new range
+        overlapping = db.execute(
+            select(PlayerDivision).where(
+                PlayerDivision.player_id == player_id,
+                or_(
+                    PlayerDivision.valid_to_period.is_(None),
+                    PlayerDivision.valid_to_period >= valid_from_period,
+                ),
+                PlayerDivision.valid_from_period <= (valid_to_period or valid_from_period),
             )
-            .one()
+        ).scalars().all()
+
+        for existing in overlapping:
+            existing.valid_to_period = valid_from_period - 1
+
+        db.add(PlayerDivision(
+            player_id         = player_id,
+            division_id       = new_division_id,
+            valid_from_period = valid_from_period,
+            valid_to_period   = valid_to_period,
+        ))
+        db.commit()
+        return (
+            f"Player {player_id} assigned to division {new_division_id} "
+            f"from period {valid_from_period} to {valid_to_period}."
         )
-        return division.div_name
-    except NoResultFound:
-        return "Unknown"
+
     except Exception as e:
-        logger.error(f"Error retrieving division for player {player_id} in period {period}: {e}")
-        return "no player matched"
+        db.rollback()
+        return f"Error updating division for player {player_id}: {e}"
+
+
+# ---------------------------------------------------------------------------
+# REGISTRATION FILTERS — determine which players appear in standings
+# ---------------------------------------------------------------------------
+
+def get_valid_player_ids(db: Session, g_creds_file: str, g_reg_info: object) -> list:
+    """Return a list of player_ids for all paid, registered players.
+
+    Reads the latest registration data from Google Sheets each time so that
+    mid-season payment status changes are reflected without a DB update.
+
+    Args:
+        db:           Active SQLAlchemy Session.
+        g_creds_file: Path to the Google service account credentials file.
+        g_reg_info:   Google Sheets config object with file_id, sheet_id, range.
+    """
+    raw = g.read_gsheet_range(g_creds_file, g_reg_info)
+    registration = g.list_to_dict(raw)
+
+    player_ids = []
+    for p in registration:
+        if p.get("Payable Status") != "paid":
+            logger.warning(f"Unpaid player excluded from standings: {p.get('UDisc Full Name')}")
+            continue
+        name = clean_player_name(p.get('UDisc Full Name', ''))
+        pid = get_player_id_by_name(db, name)
+        if pid is not None:
+            player_ids.append(pid)
+        else:
+            logger.warning(f"Paid player '{name}' not found in the Player table.")
+
+    return player_ids
+
+
+# ---------------------------------------------------------------------------
+# UTILITIES
+# ---------------------------------------------------------------------------
+
+def get_player_id_by_name(db: Session, player_name: str) -> int | None:
+    """Return the player_id for a given full name, or None if not found."""
+    return db.execute(
+        select(Player.player_id)
+        .where(Player.full_name == player_name)
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def clean_player_name(name: str) -> str:
+    """Normalise a player name from UDisc or registration input.
+
+    Strips quotes, @ symbols, extra whitespace, and title-cases the result.
+    Ensures names match consistently between the UDisc export and the Player table.
+    """
+    name = name.replace('"', '').replace("'", '').replace('@', '')
+    return name.strip().title()
+
 
 def get_division_defs(db: Session) -> list:
-    """
-    Get a list of all divisions in the database.
-    
-    Args:
-        db (Session): SQLAlchemy database session.
-    
-    Returns:
-        list: List of division names.
-    """
-    try:
-        divisions = db.execute(select(Division.div_name, Division.division_id, Division.display_order)).all()
-        return divisions
-    except Exception as e:
-        logger.error(f"Error retrieving divisions: {e}")
-        return []
-pass
-
+    """Return all divisions as a list of (div_name, division_id, display_order) tuples."""
+    return db.execute(
+        select(Division.div_name, Division.division_id, Division.display_order)
+        .order_by(Division.display_order)
+    ).all()
