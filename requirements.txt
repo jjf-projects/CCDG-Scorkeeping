@@ -1,0 +1,38 @@
+# CCDG Scorekeeping 2026 — Python dependencies
+#
+# Install with:  pip install -r requirements.txt
+#
+# Tested on Python 3.12.  All versions are pinned to what was validated
+# for the 2026 season; update carefully and re-test standings output.
+
+# Database
+SQLAlchemy==2.0.39
+
+# Google Sheets (read/write standings and registration)
+gspread==6.2.0
+
+# Google Drive (backup DB, read travel-round xlsx files)
+PyDrive2==1.21.3
+
+# Data processing (Excel/xlsx import for UDisc score exports)
+pandas==2.2.3
+openpyxl==3.1.5
+numpy==2.2.3
+
+# HTTP (UDisc score downloads)
+requests==2.32.3
+
+# Environment variable / .env file support
+python-dotenv==1.2.2
+
+# Gemini API (weekly social media summary generation)
+google-genai==1.69.0
+
+# Testing
+pytest==9.0.2
+
+# Google auth dependencies (installed transitively; pinned for stability)
+google-auth==2.38.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.164.0

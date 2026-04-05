@@ -1,269 +1,211 @@
-import csv, io, os
+# python & 3rd party
+import csv
+import io
+import os
 from datetime import datetime
+
 import pandas as pd
 from io import BytesIO
-
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 import gspread
+
 from logger.logger import logger_gen as logger
 
 
 '''
 google_tasks.py
 
-A module of utility functions to simplify calls to public libs 
-for interfacng with google cloud apis.
-* google_sheets:  https://github.com/burnash/gspread
-* google_drive:  https://github.com/iterative/PyDrive2
+Thin wrappers around the gspread and PyDrive2 libraries for interacting
+with Google Sheets and Google Drive using a service account.
+
+Setup:
+  - Create a service account in Google Cloud Console
+  - Download the JSON credentials file and point G_SVC_CREDS_FILE at it
+  - Share any Sheets/Drive folders with the service account email address
+  - See: https://docs.google.com/document/d/1obuwpJykyDmwbKyDOIOFzF-EHP-qpMCDVK81Q01vock
 '''
 
 
-### PyDrive2 ###
-# https://docs.iterative.ai/PyDrive2/quickstart/
+# ---------------------------------------------------------------------------
+# GOOGLE SHEETS  (via gspread)
+# ---------------------------------------------------------------------------
 
-def __auth_g_drive__(creds_file: str) -> GoogleDrive:
-    """
-    Google Drive service with a service account.
-    note: for the service account to work, you need to share the folder or
-    files with the service account email.
-
-    Returns a pydrive2.auth.GoogleDrive obj ready to use
-    """
-    # Define the settings dict to use a service account
-    # https://docs.iterative.ai/PyDrive2/oauth/#authentication-with-a-service-account
-    settings = {
-                "client_config_backend": "service",
-                "service_config": {
-                    "client_json_file_path": creds_file
-                }
-            }
-    try:
-        # Create instance of GoogleAuth
-        gauth = GoogleAuth(settings=settings)
-        gauth.ServiceAuth()
-        drive = GoogleDrive(auth=gauth)
-    except RuntimeError as err:
-        msg = f'Error authenticating via pyDrive. \n{err}\n Did you configure in settings?  Are the creds valid?'
-        logger.error(msg)
-        raise Exception(msg)
-
-    return drive
-
-def list_files_by_gdrive_id(creds_file: str, parent_id:str) -> list:
-    gdrive_client = __auth_g_drive__(creds_file)
-    qry_str = f"'{parent_id}' in parents"
-    file_list = gdrive_client.ListFile({'q': qry_str}).GetList()
-    file_ids = [f['id'] for f in file_list]
-    return file_ids
-
-def get_gdrivefile_metadata(creds_file: str, file_id: str, metadata_field: str) -> any:
-    '''
-    returns gDrive metadata for a file by ID.
-    https://docs.iterative.ai/PyDrive2/filemanagement/#download-file-metadata-from-file-id
-    '''
-    gdrive = __auth_g_drive__(creds_file)
-    # Fetch metadata
-    file = gdrive.CreateFile({'id': file_id})
-    metadata = file[metadata_field]
-    return metadata
-
-def read_csv_from_gdrive(creds_file: str, file_id: str, title: str) -> list:
-    '''
-    return the contents of a .csv file as a list of row dicts [{col0:val, col1:val, ..}, {...}]
-    '''
-    # auth
-    drive = __auth_g_drive__(creds_file)
-    # Get the file data as a stream
-    file = drive.CreateFile({'id': file_id})
-    data = file.GetContentString(mimetype='text/csv', encoding='utf-8-sig')
-    csv_file = io.StringIO(data)
-    # return as a list of dicts
-    reader = csv.DictReader(csv_file)
-    data_rows = [r for r in reader]
-    return data_rows
-
-def read_xslx_from_gdrive(creds_file: str, file_id: str, title: str) -> list:
-    '''
-    return the contents of a .xlsx file as a list of row dicts [{col0:val, col1:val, ..}, {...}]
-    '''
-    # auth
-    drive = __auth_g_drive__(creds_file)
-    # Get the file data as a stream
-    file = drive.CreateFile({'id': file_id})
-
-    data = None
-    with BytesIO() as buffer:
-        for chunk in file.GetContentIOBuffer():
-           buffer.write(chunk)
-        data = buffer.getvalue()
-    df = pd.read_excel(BytesIO(data))
-    data_rows = df.to_dict(orient='records')
-    return data_rows
-
-def move_files_in_gdrive(creds_file: str, files: list, to_folder_id: str) -> None:
-    ''' 
-    Moves files that have been loaded into the DB from inbox to processed folder in GDrive 
-
-    Also, inserts a timestamp in fname for forensics, eg. import.csv => import(timestamp).csv
-    '''
-    gdrive = __auth_g_drive__(creds_file)
-   
-    now_str = datetime.now().strftime('%Y-%m-%d-%H:%M')
-
-    for f in files:
-        file = gdrive.CreateFile({'id': f})
-        tit = file['title']
-        new_tit = tit[:-4] + f'({now_str})' + tit[-4:] 
-        file['title'] = new_tit
-        file['parents'] = [{'kind': 'drive#folder', 'id': to_folder_id}]
-        file.Upload()
-        logger.info(f'{tit} moved to processed folder as {new_tit}')
-    return
-
-def add_file_to_gdrive(creds_file:str, local_file: str, to_folder_id: str) -> None:
-
-    # auth
-    gdrive = __auth_g_drive__(creds_file)
-
-    # file defs for gDrive
-    local_f_basename = os.path.basename(local_file)
-    metadata = {
-        'parents': [
-            {"id": to_folder_id}
-        ],
-        'title': f'{local_f_basename}'}
-
-    # Find existing and delete
-    file_list = gdrive.ListFile({'q': f"title='{local_f_basename}' and trashed=false and '{to_folder_id}' in parents"}).GetList()
-    for file in file_list:
-    # trash one if it exists in target folder then write the new one
-        try:
-            # thows 403 if the service user did not create the file
-            file.Trash()
-            # file.Delete()   # instant, permanent
-        except:
-            msg = f'error adding "{local_f_basename}" to GDrive folder {to_folder_id}'
-            logger.error(msg)
-
-    try:
-        file = gdrive.CreateFile(metadata=metadata)
-        file.SetContentFile(local_file)  
-        file.Upload()
-        msg = f'{local_file} uploaded to gDrive folder for safe keeping'
-        logger.info(msg)
-    except Exception as e:
-        msg = f'error adding "{local_f_basename}" to GDrive folder {to_folder_id}\n\t{e}'
-        logger.error(msg)
-    return
-
-### gSpread ###
-# https://docs.gspread.org/en/latest/user-guide.html
-
-def __auth_g_sheets__(creds_file: str) -> gspread.service_account:
-    '''
-    Google Spreadsheet cient with a service account.
-    Please note: 
-    * for the service account be useful, you need to share gSheets with the service account email.
-     
-    Returns a gspread.Client obj ready to use
-    '''
-    # https://docs.gspread.org/en/latest/oauth2.html#for-bots-using-service-account
-    try:
-        gc = gspread.service_account(filename=creds_file)
-    except RuntimeError as err:
-        msg = f'gSpread auth failed. \n{err} \n Did you configure in settings?  Are the creds valid?'
-        logger.error(msg)
-        raise Exception(msg)
-    
-    return gc
-
-def read_gsheet_range(creds_file: str, gSpread_detail: dict) -> list:
-    '''
-    Returns data from a spreadsheet as a list of rows (lists)
-
-    gSpread_detail should be a dict must contains these keys:
-     * file_id
-     * sheet_id
-     * range
-    '''
-    # auth via gSpread and get a Client - https://docs.gspread.org/en/latest/api/client.html
-    gspread_client = __auth_g_sheets__(creds_file)
-
-    # where is the data to read?
-    gsheet_id = gSpread_detail['file_id']
-    wksht_id = gSpread_detail['sheet_id']
-    rng = gSpread_detail['range']
-
-    # read that sht
-     # https://docs.gspread.org/en/latest/api/models/index.html
-    try:
-        gsheet = gspread_client.open_by_key(gsheet_id)
-    except PermissionError:
-        msg = "Did you grant the service user permissions on the GFrive files & folders? ccdg-google-service-account@ccdg-csv-utility.iam.gserviceaccount.com"
-        print(msg)
-        logger.error(msg)
-    wksht = gsheet.get_worksheet_by_id(wksht_id)
-    data = wksht.get(rng)
-    
-    return data
-
-def write_gsheet_range(creds_file: str, gSpread_detail: dict, row_data: list) -> None:
-    '''
-    Writes a list of lists-as-rows to a gSheet range - each inner-list item is a cell in that row
-    e.g. in A1 notation: [[A1,B1],[A2,B2],[A3,B3]] is a two-col list with three rows
-    '''
-   # auth via gSpread and get a Client - https://docs.gspread.org/en/latest/api/client.html
-    gspread_client = __auth_g_sheets__(creds_file)
-
-    # Write the list of rows to the Google Sheet
-    # https://docs.gspread.org/en/latest/user-guide.html#updating-cells
-    
-    # where to write data
-    gsheet_id = gSpread_detail['file_id']
-    wksht_id = gSpread_detail['sheet_id']
-    
-    # open in gSpread
-    gsheet = gspread_client.open_by_key(gsheet_id)
-    wksht = gsheet.get_worksheet_by_id(wksht_id)
-    
-    # clear sheet & write all new rows
-    wksht.clear()
-    wksht.update('A1', row_data)
-
-    return
-
-def list_to_dict(data: list):
-    """
-    Converts a list of lists into a list of dictionaries using the first row as headers.
+def read_gsheet_range(creds_file: str, sheet_info: dict) -> list:
+    """Read a range from a Google Sheet and return it as a list of rows.
 
     Args:
-        data (list): A list of lists where the first list contains headers.
+        creds_file: Path to the service account JSON credentials file.
+        sheet_info: Dict with keys: file_id (str), sheet_id (int), range (str).
 
     Returns:
-        list of dict: A list of dictionaries with headers as keys.
+        List of lists — each inner list is one row of cell values.
+    """
+    client = _auth_sheets(creds_file)
+    try:
+        sheet = client.open_by_key(sheet_info['file_id'])
+    except PermissionError:
+        msg = (
+            "Permission denied reading Google Sheet. "
+            "Did you share it with the service account? "
+            "ccdg-google-service-account@ccdg-csv-utility.iam.gserviceaccount.com"
+        )
+        logger.error(msg)
+        raise
+
+    worksheet = sheet.get_worksheet_by_id(sheet_info['sheet_id'])
+    return worksheet.get(sheet_info['range'])
+
+
+def write_gsheet_range(creds_file: str, sheet_info: dict, rows: list) -> None:
+    """Clear a Google Sheet tab and write new data starting at A1.
+
+    Args:
+        creds_file: Path to the service account JSON credentials file.
+        sheet_info: Dict with keys: file_id (str), sheet_id (int).
+        rows:       List of lists — each inner list is one row of cell values.
+    """
+    client = _auth_sheets(creds_file)
+    sheet = client.open_by_key(sheet_info['file_id'])
+    worksheet = sheet.get_worksheet_by_id(sheet_info['sheet_id'])
+    worksheet.clear()
+    worksheet.update('A1', rows)
+
+
+def list_to_dict(data: list) -> list:
+    """Convert a list-of-lists (with a header row) to a list of dicts.
+
+    The first row is used as dict keys.  Useful for turning raw gsheet
+    data into structured registration rows.
+
+    Example:
+        [['Name', 'Email'], ['Alice', 'a@b.com']]
+        → [{'Name': 'Alice', 'Email': 'a@b.com'}]
     """
     if not data or len(data) < 2:
-        return []  # Return empty list if data is empty or has no rows beyond headers
-    
-    headers = data[0]  # Extract column headers
-    return [dict(zip(headers, row)) for row in data[1:]]  # Map headers to each row
+        return []
+    headers = data[0]
+    return [dict(zip(headers, row)) for row in data[1:]]
 
-def dicts_to_list(data: list):
-    '''
-    Converts a list of dictionaries into a list of lists using the keys of the first dictionary as headers.
-    Args:
-        data (list): A list of dictionaries.
-    Returns:  
-        list of lists: A list of lists with the first list as headers.
-    '''
+
+def dicts_to_list(data: list) -> list:
+    """Convert a list of dicts to a list-of-lists with a header row.
+
+    Inverse of list_to_dict.  Useful for preparing data to write back
+    to a Google Sheet.
+    """
     if not data:
-        return []  # Return empty list if input is empty
-    
-    # Extract headers from the keys of the first dictionary
+        return []
     headers = list(data[0].keys())
+    return [headers] + [[row[k] for k in headers] for row in data]
 
-    # Convert dicts to lists using the headers
-    rows = [headers] + [[d[key] for key in headers] for d in data]
 
-    return rows
+# ---------------------------------------------------------------------------
+# GOOGLE DRIVE  (via PyDrive2)
+# ---------------------------------------------------------------------------
+
+def add_file_to_gdrive(creds_file: str, local_file: str, folder_id: str) -> None:
+    """Upload a local file to a Google Drive folder, replacing any existing file with the same name.
+
+    Args:
+        creds_file: Path to the service account JSON credentials file.
+        local_file: Absolute path to the file to upload.
+        folder_id:  Google Drive folder ID to upload into.
+    """
+    drive = _auth_drive(creds_file)
+    filename = os.path.basename(local_file)
+
+    # Trash any existing file with the same name in the target folder
+    existing = drive.ListFile(
+        {'q': f"title='{filename}' and trashed=false and '{folder_id}' in parents"}
+    ).GetList()
+    for f in existing:
+        try:
+            f.Trash()
+        except Exception as e:
+            logger.error(f"Could not trash existing '{filename}' in Drive folder {folder_id}: {e}")
+
+    try:
+        new_file = drive.CreateFile({
+            'title': filename,
+            'parents': [{'id': folder_id}],
+        })
+        new_file.SetContentFile(local_file)
+        new_file.Upload()
+        logger.info(f"Uploaded '{local_file}' to Drive folder {folder_id}.")
+    except Exception as e:
+        logger.error(f"Failed to upload '{filename}' to Drive folder {folder_id}: {e}")
+
+
+def read_csv_from_gdrive(creds_file: str, file_id: str) -> list:
+    """Download a CSV file from Google Drive and return its rows as a list of dicts.
+
+    Args:
+        creds_file: Path to the service account JSON credentials file.
+        file_id:    Google Drive file ID.
+    """
+    drive = _auth_drive(creds_file)
+    f = drive.CreateFile({'id': file_id})
+    raw = f.GetContentString(mimetype='text/csv', encoding='utf-8-sig')
+    return list(csv.DictReader(io.StringIO(raw)))
+
+
+def read_xlsx_from_gdrive(creds_file: str, file_id: str) -> list:
+    """Download an xlsx file from Google Drive and return its rows as a list of dicts.
+
+    Args:
+        creds_file: Path to the service account JSON credentials file.
+        file_id:    Google Drive file ID.
+    """
+    drive = _auth_drive(creds_file)
+    f = drive.CreateFile({'id': file_id})
+
+    buffer = BytesIO()
+    for chunk in f.GetContentIOBuffer():
+        buffer.write(chunk)
+    buffer.seek(0)
+
+    return pd.read_excel(buffer).to_dict(orient='records')
+
+
+def get_gdrive_file_metadata(creds_file: str, file_id: str, field: str):
+    """Return a single metadata field for a Drive file (e.g. 'modifiedDate').
+
+    Args:
+        creds_file: Path to the service account JSON credentials file.
+        file_id:    Google Drive file ID.
+        field:      The metadata field name to retrieve.
+    """
+    drive = _auth_drive(creds_file)
+    f = drive.CreateFile({'id': file_id})
+    return f[field]
+
+
+# ---------------------------------------------------------------------------
+# PRIVATE AUTH HELPERS
+# ---------------------------------------------------------------------------
+
+def _auth_sheets(creds_file: str) -> gspread.Client:
+    """Return an authenticated gspread Client using a service account."""
+    try:
+        return gspread.service_account(filename=creds_file)
+    except Exception as e:
+        msg = f"gspread authentication failed: {e}. Check that G_SVC_CREDS_FILE is correct."
+        logger.error(msg)
+        raise
+
+
+def _auth_drive(creds_file: str) -> GoogleDrive:
+    """Return an authenticated PyDrive2 GoogleDrive instance using a service account."""
+    settings = {
+        "client_config_backend": "service",
+        "service_config": {"client_json_file_path": creds_file},
+    }
+    try:
+        gauth = GoogleAuth(settings=settings)
+        gauth.ServiceAuth()
+        return GoogleDrive(auth=gauth)
+    except Exception as e:
+        msg = f"PyDrive2 authentication failed: {e}. Check that G_SVC_CREDS_FILE is correct."
+        logger.error(msg)
+        raise

@@ -1,65 +1,75 @@
-'''
-Creates log files locally.  There are two:
-- General Logs
-    Both process_inbox.py and generate_standings.py will write to the same file each time the main program is run
-    Has datastamp in the filename
-- PLAYERS.log
-    Is a season-long log file that details:
-      - new players each week (for checking that they paid to join)
-      - Divisional changes
-      - any errors updating database
+"""
+logger.py
 
-These logs will be synced to google with each run so they may be accessed remotely by admins.
-'''
+Configures the shared logger used across the CCDG scoring utility.
 
-import logging, os
-from logging import FileHandler
-from logging import Formatter
+Two handlers are attached to every run:
+  - File handler:    logs/YYYY-MM-DD.log  (one file per calendar day)
+  - Console handler: prints INFO and above to the terminal so admins can
+                     see what's happening without tailing the log file
+
+Log format: 2026-03-15 10:23:45,123 [INFO] - message text
+
+Log files are kept in the logs/ directory at the project root.
+logs/ is gitignored but is backed up to Google Drive on each run.
+"""
+
+import logging
+import os
+from logging import FileHandler, StreamHandler, Formatter
 from datetime import datetime
 
 
-# https://blog.muya.co.ke/configuring-multiple-loggers-python/
+_HERE    = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR  = os.path.join(_HERE, '..', 'logs')
+LOG_DIR  = os.path.normpath(LOG_DIR)
 
-LOG_DIR = os.path.join(os.path.abspath(__file__), ".." ,"..",'logs')
-LOG_FORMAT = ("%(asctime)s [%(levelname)s] - %(message)s ")
-LOG_LEVEL = logging.INFO
-DT_FORMAT = '%Y-%m-%d'
-GENERAL_LOG_FILE = os.path.join(LOG_DIR, f'{datetime.now().strftime(DT_FORMAT)}.log')
+LOG_FORMAT   = "%(asctime)s [%(levelname)s] - %(message)s"
+DATE_FORMAT  = "%Y-%m-%d %H:%M:%S"
+LOG_LEVEL    = logging.INFO
 
+# One log file per calendar day — date-stamped name makes them easy to archive.
+log_filename = datetime.now().strftime('%Y-%m-%d') + '.log'
+LOG_FILE     = os.path.join(LOG_DIR, log_filename)
 
-if not os.path.exists(LOG_DIR):
-    os.mkdir(LOG_DIR)
+os.makedirs(LOG_DIR, exist_ok=True)
 
-# general logger - writes a file whenever this runs
-logger_gen = logging.getLogger('CCDG_csv_util.gen_logging')
+formatter = Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
+
+# File handler — full record of every run
+_file_handler = FileHandler(LOG_FILE)
+_file_handler.setLevel(LOG_LEVEL)
+_file_handler.setFormatter(formatter)
+
+# Console handler — visible in the terminal during interactive runs
+_console_handler = StreamHandler()
+_console_handler.setLevel(LOG_LEVEL)
+_console_handler.setFormatter(formatter)
+
+logger_gen = logging.getLogger('ccdg')
 logger_gen.setLevel(LOG_LEVEL)
-logger_gen_file_handler = FileHandler(GENERAL_LOG_FILE)
-logger_gen_file_handler.setLevel(LOG_LEVEL)
-logger_gen_file_handler.setFormatter(Formatter(LOG_FORMAT))
-logger_gen.addHandler(logger_gen_file_handler)
 
-# # Players - one file per whole season
-# logger_players = logging.getLogger('CCDG_csv_util.player_logging')
-# logger_players.setLevel(LOG_LEVEL)
-# players_logger_file_handler = FileHandler(PLAYERS_LOG_FILE)
-# players_logger_file_handler.setLevel(LOG_LEVEL)
-# players_logger_file_handler.setFormatter(Formatter(LOG_FORMAT))
-# logger_players.addHandler(players_logger_file_handler)
+# Guard against duplicate handlers if this module is imported more than once
+if not logger_gen.handlers:
+    logger_gen.addHandler(_file_handler)
+    logger_gen.addHandler(_console_handler)
 
-def delete_log_files():
+
+def delete_log_files() -> None:
+    """Delete all log files in the logs/ directory.
+
+    Subdirectories are not affected.  Useful for housekeeping at the
+    start of a new season.
     """
-    Deletes all files in the specified directory. Subdirectories are not affected.
-    """
-    directory = LOG_DIR  # Specify the directory you want to delete files from
-    if not os.path.isdir(directory):
-        logging.warning(f"{directory} is not a valid directory.")
+    if not os.path.isdir(LOG_DIR):
+        logger_gen.warning(f"Log directory not found: {LOG_DIR}")
         return
 
-    for filename in os.listdir(directory):
-        file_path = os.path.join(directory, filename)
+    for filename in os.listdir(LOG_DIR):
+        file_path = os.path.join(LOG_DIR, filename)
         if os.path.isfile(file_path):
             try:
                 os.remove(file_path)
-                logging.info(f"Deleted file: {file_path}")
+                logger_gen.info(f"Deleted log file: {file_path}")
             except Exception as e:
-                logging.error(f"Failed to delete {file_path}: {e}")
+                logger_gen.error(f"Failed to delete {file_path}: {e}")

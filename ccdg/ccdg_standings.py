@@ -1,358 +1,313 @@
-# python and 3rd party modules
+# python & 3rd party
 from sqlalchemy import select, func
-from sqlalchemy.orm import session
-
-# custom modules
-from sql_db.models import Score, Schedule, Division
+from sqlalchemy.orm import Session
+# custom
+from sql_db.models import Score, Schedule
 from ccdg import ccdg_scores, ccdg_schedule
 import google_apis.google_tasks as g
 from logger.logger import logger_gen as logger
 
+
 '''
 ccdg_standings.py
 
-A module for generating public facing standings via the CCDG Weekly CSV Scoring Utility
+Generates and publishes season standings to Google Sheets.
 
+Three sheets are written each run:
+  1. Scores      — raw relative scores by player/period
+  2. Points      — points earned per period, plus cycle totals and drops
+  3. Weekly Avg  — each player's average points per week played
+
+All three sheets share the same three-row header:
+  Row 1: period numbers
+  Row 2: Saturday dates
+  Row 3: course names  (this row also contains the lead column labels)
 '''
 
-
-def generate_standings(db: session, player_registration: list, cfg: dict) -> None:
-    '''
-    Write season-to-date results to Google Sheets from the DB.  This includes
-    realtive_scores, points, wkly avg_pts
-
-    '''
-
-    # how may periods dictates how many cols we will need
-    periods_elapsed = db.execute(select(func.max(Score.period))).scalar_one_or_none()
-    curr_cycle = ccdg_schedule.get_current_cycle(db) # in case of more than one week to process
-
-    
-    ## Scores sheet ##
-
-    # get a list of score table rows for all players and periods so far; sort by most recent week
-    score_rows =ccdg_scores.get_player_scores_all_periods(db) 
-    score_rows = sorted(score_rows, key=lambda x: x[-1] if x[-1] is not None else float('inf'))
-
-    # remove unpaid players from the published results - ** note there is a new function in ccdg_players.py to get a list of valid players
-    #   note: their scores are still kept in the DB - just need to update the sheet from cfg.G_REGISTRATION
-    unpaid_players = [p.get("UDisc Full Name") for p in player_registration if p.get("Payable Status") != "paid"]
-    for p in unpaid_players:
-        logger.warning(f"Unpaid player: {p}")
-    score_rows = [row for row in score_rows if row[0] not in unpaid_players]
-
-    # Get the header rows for the scores sheet & add scores below
-    header_rows = create_header_rows(db, cfg.LEAD_COLS_SCORES, cfg.DT_FORMAT["spreadsheet"])
-    score_sheet_data = header_rows + score_rows
-    
-    # replace all the data on the scores worksheet with latest results
-    gsheet_target = {
-        'file_id': cfg.G_STANDINGS['file_id'],
-        'sheet_id': cfg.G_STANDINGS['score_sheet']
-        }
-    g.write_gsheet_range(cfg.G_SVC_CREDS_FILE, gsheet_target, score_sheet_data)
+# Column positions in a points_row after generate_standings builds it.
+# Shape: [name, division, total_pts, pts_after_drops, period_1_pts, period_2_pts, ...]
+_COL_NAME           = 0
+_COL_DIVISION       = 1
+_COL_TOTAL_PTS      = 2
+_COL_PTS_AFTER_DROPS = 3
+_COL_FIRST_PERIOD   = 4   # per-period points start here
 
 
-    ## Points sheet ##
-    
-    points_data = [[p[0], p[1]] for p in score_rows]  # start with player [name, division]
+def generate_standings(db: Session, player_registration: list[dict], cfg: object) -> None:
+    """Compute standings and write all three sheets to Google Sheets.
 
-    # iterate over periods and add points to the points_data list
-    for period in range(periods_elapsed):  # period starts counting at 0
-        period_index = period + 2  #score_rows starts w/ Name, Division, so +2 to get to the first period
-        period_scores = [[row[0], row[period_index]] if len(row) > 2 else [row[0], None] for row in score_rows]
-        period_points = percentage_plus_Marnie(period_scores, cfg.SCORING)
-        for player_row in points_data:
-            pts = [pp[1] for pp in period_points if pp[0] == player_row[0]]
-            player_row.append((pts[0] if pts else 0))  # None scores become zero pts
-
-    # insert tot pts and pts-after-drop cols
-    for row in points_data:
-        tot_col_vals = tally_totals(row[2:], curr_cycle, cfg.SCORING["cycle_len"], cfg.SCORING["keep_periods"])
-        row.insert(2, tot_col_vals["points_total"])
-        row.insert(3, tot_col_vals["points_after_drops"])
-    
-    # sort by name
-    points_rows = sorted(points_data, key=lambda x: x[0])
-
-     # Get the header rows for the scores sheet & add points rows below
-    header_rows = create_header_rows(db, cfg.LEAD_COLS_POINTS, cfg.DT_FORMAT["spreadsheet"])
-    points_sheet_data = header_rows + points_rows
-
-    # replace all the data on the points worksheet witht the latest results
-    gsheet_target = {
-        'file_id': cfg.G_STANDINGS['file_id'],
-        'sheet_id': cfg.G_STANDINGS['points_sheet']
-        }
-    g.write_gsheet_range(cfg.G_SVC_CREDS_FILE, gsheet_target, points_sheet_data)
-
-    
-    ##  weekly Avg Points ##
-    
-    period_avg_points_rows = get_period_avg_points(points_rows) # sorted by name with a header
-    gsheet_target = {
-        'file_id': cfg.G_STANDINGS['file_id'],
-        'sheet_id': cfg.G_STANDINGS['weekly_avg_pts']
-        }
-    g.write_gsheet_range(cfg.G_SVC_CREDS_FILE, gsheet_target, period_avg_points_rows)
-
-    return
-
-###  Utility  ###
-
-def create_header_rows(db: session, lead_cols: list, date_format: str) -> list:
-    """
-    Creates a three-row header for the Google Standings sheet.
-    Example: https://docs.google.com/spreadsheets/d/1TeDuilz8Clf50uT3GXzTeLbqj8tTzGrbwyHHSga9qSE/edit?gid=0#gid=0
-    
     Args:
-        db: SQLAlchemy session or connection object.
-        lead_cols: A list of lead column names for the table header.
-    
-    Returns:
-        A list of lists representing the table header rows.
+        db:                  Active SQLAlchemy Session.
+        player_registration: List of registration row dicts (from Google Sheets).
+        cfg:                 Configuration object (from ccdg_settings.py).
     """
-    # Fetch all distinct periods and related schedule data
-    schedule_data = db.execute(
+    periods_elapsed = db.execute(select(func.max(Score.period))).scalar_one_or_none()
+    if not periods_elapsed:
+        logger.warning("No scored periods found — standings not written.")
+        return
+
+    curr_cycle = ccdg_schedule.get_current_cycle(db)
+
+    # --- Build the filtered, sorted score data used by all three sheets ---
+
+    # score_rows from get_scores_pivot: [player_id, name, division, score_p1, score_p2, ...]
+    # Sort by the most recent period score (ascending = best first).
+    score_rows = ccdg_scores.get_scores_pivot(db)
+    score_rows = sorted(score_rows, key=lambda r: r[-1] if r[-1] is not None else float('inf'))
+
+    # Scores are stored in the DB for every registered player regardless of payment
+    # status or division assignment.  Only filter them out of the *published* standings.
+    #
+    # Exclude: unpaid players, and players with no division assigned yet ("Unknown").
+    # Their scores remain in the DB and will appear in standings once they pay/are assigned.
+    unpaid_names = {
+        p.get("UDisc Full Name")
+        for p in player_registration
+        if p.get("Payable Status") != "paid"
+    }
+    if unpaid_names:
+        logger.info(
+            f"Excluding {len(unpaid_names)} unpaid player(s) from standings: "
+            + ", ".join(sorted(unpaid_names))
+        )
+
+    no_div_names = {r[1] for r in score_rows if r[1] not in unpaid_names and r[2] == "Unknown"}
+    if no_div_names:
+        logger.info(
+            f"Excluding {len(no_div_names)} player(s) with no division assigned yet: "
+            + ", ".join(sorted(no_div_names))
+        )
+
+    score_rows = [
+        r for r in score_rows
+        if r[1] not in unpaid_names   # r[1] = name
+        and r[2] != "Unknown"         # r[2] = division; "Unknown" means not yet assigned
+    ]
+
+    # --- Sheet 1: Scores ---
+    # Strip player_id (col 0) — not for public consumption.
+    # Published shape: [name, division, score_p1, score_p2, ...]
+    _write_sheet(
+        cfg,
+        sheet_key='score_sheet',
+        header_rows=create_header_rows(db, cfg.LEAD_COLS_SCORES, cfg.DT_FORMAT["spreadsheet"]),
+        data_rows=[r[1:] for r in score_rows],
+    )
+    logger.info("Scores sheet written.")
+
+    # --- Sheet 2: Points ---
+    points_rows = _build_points_rows(score_rows, periods_elapsed, curr_cycle, cfg.SCORING)
+    _write_sheet(
+        cfg,
+        sheet_key='points_sheet',
+        header_rows=create_header_rows(db, cfg.LEAD_COLS_POINTS, cfg.DT_FORMAT["spreadsheet"]),
+        data_rows=sorted(points_rows, key=lambda r: r[_COL_NAME]),
+    )
+    logger.info("Points sheet written.")
+
+    # --- Sheet 3: Weekly Average Points ---
+    _write_sheet(
+        cfg,
+        sheet_key='weekly_avg_pts',
+        header_rows=[['Player', 'Division', 'Weekly Avg Points']],
+        data_rows=_build_avg_points_rows(points_rows),
+    )
+    logger.info("Weekly average points sheet written.")
+
+
+# ---------------------------------------------------------------------------
+# SHEET BUILDERS
+# ---------------------------------------------------------------------------
+
+def _build_points_rows(score_rows: list, periods_elapsed: int, curr_cycle: int, scoring: dict) -> list:
+    """Compute per-period points for every player and return the full points table.
+
+    Returns rows shaped: [name, division, total_pts, pts_after_drops, p1_pts, p2_pts, ...]
+    """
+    # Start with [name, division]; period points will be appended.
+    points_data = [[r[1], r[2]] for r in score_rows]
+
+    # score_rows col layout: 0=player_id, 1=name, 2=division, 3+=per-period scores
+    SCORE_START = 3
+    for i in range(periods_elapsed):
+        score_col = SCORE_START + i
+        # Each entry: [name, score_or_None]
+        period_scores = [
+            [r[1], r[score_col]]
+            for r in score_rows
+            if len(r) > score_col
+        ]
+        period_points = calc_points_for_period(period_scores, scoring)
+        pts_by_name = {row[0]: row[1] for row in period_points}
+
+        for player_row in points_data:
+            player_row.append(pts_by_name.get(player_row[_COL_NAME], 0))
+
+    # Insert cycle summary columns at positions 2 and 3.
+    # After insert: [name, division, total_pts, pts_after_drops, p1_pts, p2_pts, ...]
+    for row in points_data:
+        period_pts = row[2:]   # everything after name & division, before inserts
+        totals = _tally_cycle_totals(period_pts, curr_cycle, scoring["cycle_len"], scoring["keep_periods"])
+        row.insert(_COL_TOTAL_PTS,       totals["points_total"])
+        row.insert(_COL_PTS_AFTER_DROPS, totals["points_after_drops"])
+
+    return points_data
+
+
+def _build_avg_points_rows(points_rows: list) -> list:
+    """Compute each player's average points per week played.
+
+    Ignores zero-point weeks (player did not play).
+    Returns rows sorted alphabetically: [name, division, avg_pts].
+    """
+    avg_rows = []
+    for r in points_rows:
+        period_pts = r[_COL_FIRST_PERIOD:]
+        played = [pts for pts in period_pts if pts != 0]
+        avg = round(sum(played) / len(played), 2) if played else 0
+        avg_rows.append([r[_COL_NAME], r[_COL_DIVISION], avg])
+
+    return sorted(avg_rows, key=lambda r: r[0])
+
+
+def create_header_rows(db: Session, lead_cols: list[str], date_format: str) -> list[list]:
+    """Build the three-row header used on the scores and points sheets.
+
+    Row 1: period numbers  (e.g. 1, 2, 3, ...)
+    Row 2: Saturday dates  (e.g. 21-Mar, 28-Mar, ...)
+    Row 3: course names    (lead_cols in the first N cells, then course names)
+
+    Args:
+        db:          Active SQLAlchemy Session.
+        lead_cols:   Labels for the fixed left columns (e.g. ['Name', 'Division']).
+        date_format: strftime format string for the date row (e.g. '%d-%b').
+    """
+    schedule = db.execute(
         select(Schedule.period, Schedule.saturday, Schedule.course)
         .order_by(Schedule.period)
     ).all()
 
-    # Extract data into three header rows
-    lead_cols_epmty = [""] * len(lead_cols)
-    period_row = lead_cols_epmty + [str(row.period) for row in schedule_data]
-    saturday_row = lead_cols_epmty + [row.saturday.strftime('%d-%b') if row.saturday else "" for row in schedule_data]
-    course_row = lead_cols + [row.course or "" for row in schedule_data]
+    blanks = [""] * len(lead_cols)
+    period_row   = blanks + [str(row.period) for row in schedule]
+    date_row     = blanks + [row.saturday.strftime(date_format) if row.saturday else "" for row in schedule]
+    course_row   = list(lead_cols) + [row.course or "" for row in schedule]
 
-    return [period_row, saturday_row, course_row]
+    return [period_row, date_row, course_row]
 
-def tally_totals(season_points: list, cycle: int, cycle_len: int, keep_periods: int) -> dict:
-    ''' 
-    Calculate total points and points-after-drops for a single player at a time
 
-    Arguments:
-        cycle_points: a list of a player's point values
-        cycle_len: periods in an award cycle
-        keep_periods: the periods that count toward pts-after-drops
+# ---------------------------------------------------------------------------
+# SCORING ALGORITHM
+# ---------------------------------------------------------------------------
+
+def calc_points_for_period(period_scores: list, scoring: dict) -> list:
+    """Apply the Percentage + Marnie algorithm to one period's scores.
+
+    The algorithm has two components that together sum to a max of 150 pts:
+      - Percentage component (120 pts): rewards placement rank as a % of field size
+      - Score-based component (30 pts): rewards margin of victory vs the field range
+
+    Ties are handled by averaging the points that would have been awarded across
+    the tied positions.
+
+    Args:
+        period_scores: List of [name, score] pairs. score is relative_score (int)
+                       or None for players who did not play.
+        scoring:       Dict with keys: percentage_modifier, score_based_modifier.
+
     Returns:
-        dict w/ 2 keys:
-        'points_total'
-        'points_after_drops'
-    '''
+        List of [name, points] pairs for players who played (None scores excluded).
+    """
+    # Remove non-players and sort ascending (lower score = better)
+    played = sorted(
+        [r for r in period_scores if r[1] is not None],
+        key=lambda r: r[1],
+    )
 
-    # add points from dict into an easy-to-sum list
-    
-    start_index = (cycle - 1) * cycle_len  # Calculate start index
-    end_index = end_index = min(start_index + cycle_len, len(season_points))
-    vals_to_tally = season_points[start_index:end_index]  # Extract the relevant scores
-     
-    # sum total and points-after-drops
-    pts_total = sum(p for p in vals_to_tally if p is not None)
-    if len(vals_to_tally) > keep_periods:
-        vals_to_tally.sort(reverse=True)
-        pad_vals_to_tally = vals_to_tally[:keep_periods]
-        pts_after_drops = sum(p for p in pad_vals_to_tally if p is not None)
-    else:  
+    if not played:
+        return []
+
+    total      = len(played)
+    best_score = int(played[0][1])
+    worst_score = int(played[-1][1])
+    score_range = worst_score - best_score  # used for score-based component
+
+    result = []
+    i = 0
+    while i < total:
+        score = int(played[i][1])
+
+        # Count how many players share this score (ties)
+        tie_count = 1
+        while i + tie_count < total and int(played[i + tie_count][1]) == score:
+            tie_count += 1
+
+        # Sum the percentage points that would go to each tied position, then split evenly
+        pct_pts_sum = sum(
+            ((total - (i + offset)) / total) * scoring['percentage_modifier']
+            for offset in range(tie_count)
+        )
+        pct_pts = pct_pts_sum / tie_count
+
+        # Score-based component: 0 when all players tie (score_range == 0)
+        if score_range > 0:
+            score_pts = (scoring['score_based_modifier'] / score_range) * (worst_score - score)
+        else:
+            score_pts = 0
+
+        points = round(pct_pts + score_pts, 2)
+
+        for offset in range(tie_count):
+            result.append([played[i + offset][0], points])
+
+        i += tie_count
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------------------------
+
+def _tally_cycle_totals(season_points: list, cycle: int, cycle_len: int, keep_periods: int) -> dict:
+    """Sum points for the current cycle and compute points-after-drops.
+
+    Only counts scores from the current cycle (not prior cycles).
+    Points-after-drops keeps only the best `keep_periods` scores.
+
+    Args:
+        season_points: All of a player's per-period points for the full season.
+        cycle:         The cycle number to tally (1-based).
+        cycle_len:     Number of periods in a cycle (12).
+        keep_periods:  How many scores count toward points-after-drops (6).
+    """
+    start = (cycle - 1) * cycle_len
+    end   = min(start + cycle_len, len(season_points))
+    cycle_pts = [p for p in season_points[start:end] if p is not None]
+
+    pts_total = sum(cycle_pts)
+
+    if len(cycle_pts) > keep_periods:
+        pts_after_drops = sum(sorted(cycle_pts, reverse=True)[:keep_periods])
+    else:
         pts_after_drops = pts_total
-    
-    # ship it
-    point_tots = {
-        'points_total': round(pts_total,2),
-        'points_after_drops': round(pts_after_drops,2)
+
+    return {
+        'points_total':      round(pts_total, 2),
+        'points_after_drops': round(pts_after_drops, 2),
     }
-    return point_tots
-
-def get_period_avg_points(rows_points:list):
-    '''
-        returns avg points scored for only the periods played ready to write to csv of gsheet
-        * pass a list of lists like [[name, div, pts1,pts2,.],[...]]
-        * returns a list of lists like [[name, div, avg],[row2],..]
-
-        Note: some indexes are hardcoded - check the cols in r if input cols are diff
-    '''
-    period_avg_pts_rows = []    
-    for r in rows_points:
-        plyr = r[0]
-        div = r[1]
-        non_zero = [pts for pts in r[4:] if pts!= 0]
-        avg = sum(non_zero) / len(non_zero) if non_zero else 0
-        avg = round(avg, 2)
-        period_avg_pts_rows.append([plyr, div, avg])
-    avg_pt_rows_sorted = sorted(period_avg_pts_rows, key=lambda x: x[0])
-    avg_pt_rows_sorted.insert(0, ['Player', 'Division', 'Weekly Avg Points']) 
-    
-    return avg_pt_rows_sorted
 
 
-###  Point systems  ###
+def _write_sheet(cfg, sheet_key: str, header_rows: list, data_rows: list) -> None:
+    """Clear and rewrite one Google Sheet tab.
 
-def percentage_plus_Marnie(period_scores, scoring_modifiers: dict):
-    '''
-    calculate points for a single period
-    
-    Arguments:
-        player_list: list of lists with player name and score for that period
-        scoring_modifiers: dict with scoring modifiers for the period
-    
-    Returns:
-        list of lists with player name and points for that period
-        '''
-
-    points_rows = []
-
-    # sort lists like [name, score] by score ascending
-    period_scores = sorted(period_scores, key=lambda x: x[1]if x[1] is not None else float('inf')) # period_scores[1] is in format ['Name', relative_score]
-    
-    # remove playesr who didn't play that week
-    period_scores = [r for r in period_scores if r[1] is not None]
-
-    # calculate points
-    index = 0
-    total = len(period_scores)
-
-    best_score = int(period_scores[0][1])
-    worst_score = int(period_scores[total - 1][1])
-
-    while index < total:
-        score = int(period_scores[index][1])
-        #see if we have ties
-        subindex = index + 1
-        numscores = 1
-        while subindex < total:
-            if score == int(period_scores[subindex][1]):
-                numscores += 1
-                subindex += 1
-            else:
-                break
-        
-        #now iterate over number of scores and calculate subtotal to be divided
-        score_count = 0
-        points = 0
-        temp_index = index
-        while score_count < numscores:
-            points += ((total - temp_index)/total)*scoring_modifiers['percentage_modifier']
-            temp_index += 1
-            score_count += 1
-        
-        #divide points across ties
-        actual_points = points/numscores
-        actual_points += (scoring_modifiers['score_based_modifier']/(worst_score - best_score))*(worst_score - score)
-        actual_points = round(actual_points, 2)
-
-        offset = 0
-        while offset < numscores:
-            period_scores[index + offset].append(actual_points)
-            offset += 1    
-
-        index += numscores - 1
-        index+=1
-    
-    #we don't need the actual scores anymore, so strip em
-    [r.pop(1) for r in period_scores]
-
-    return period_scores
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## Deprecated or never used ##
-
-# def get_global_points(db_settings: dict, season: int, season_periods_elapsed: int, lead_col_pts: list, scoring_modifiers: dict):
-    
-#     points_by_period = []
-
-#     # generate points by period 
-#     for period in range(season_periods_elapsed):
-#         wk = period + 1
-#         period_scores = ccdg_scores.get_scores_for_period(db_settings, season, wk)
-#         period_points = percentage_plus_Marnie(period_scores, scoring_modifiers)
-#         points_by_period.append(period_points)
-#     point_dicts = transpose_for_output(db_settings, points_by_period, season, lead_col_pts, scoring_modifiers)
-    
-#     # # sort - pts_after
-#     points_by_player = sorted(point_dicts, key=lambda x:(-x['Points After Drops Cycle']))
-
-#     return points_by_player
-
-# def get_divisional_points(db_settings: dict, season_periods_elapsed: int):
-#     '''
-#     Apply %+Marnie to each division to flatten things out.
-#     i.e each division has a max of 150 pts where
-#         "percentage_modifier": 120,
-#         "score_based_modifier": 30,
-    
-#     Experiment abandoned - 2024 pre-season in lieu of rebalancing - see ccdg_sidehatch
-#     '''
-#     pass
-
-#     # Unimplemented after major refactor- revist/debug before running
-
-#     # points_by_period = []
-    
-#     # for period in range(season_periods_elapsed):
-#     #     wk = period + 1
-#     #     period_scores = get_scores_for_period(db_settings, wk)
-        
-#     #     # split into divisions
-#     #     period_points = []
-#     #     for div_label in DIVISIONS:
-#     #         div_scores = [r for r in period_scores if r[1] == div_label]
-#     #         div_points = percentage_plus_Marnie(div_scores)
-#     #         period_points.extend(div_points)
-#     #     points_by_period.append(period_points)
-
-#     # point_dicts = transpose_for_csv_writer(db_file, points_by_period)
-#     # # sort - pts_after desc
-#     # points_by_player = sorted(point_dicts, key=lambda x:(-x['Points After Drops']))
-
-#     # return points_by_player
-
-# def get_period_avg_points(rows_points:list):
-#     '''
-#         returns avg points scored for only the periods played ready to write to csv of gsheet
-#         * pass a list of lists like [[name, div, pts1,pts2,.],[...]]
-#         * returns a list of lists like [[name, div, avg],[row2],..]
-
-#         Note: some indexes are hardcoded - check the cols in r if input cols are diff
-#     '''
-#     period_avg_pts_rows = []    
-#     for r in rows_points:
-#         plyr = r[0]
-#         div = r[1]
-#         non_zero = [pts for pts in r[4:] if pts!= 0]
-#         avg = sum(non_zero) / len(non_zero) if non_zero else 0
-#         avg = round(avg, 2)
-#         period_avg_pts_rows.append([plyr, div, avg])
-#     avg_pt_rows_sorted = sorted(period_avg_pts_rows, key=lambda x: x[2], reverse=True)
-#     avg_pt_rows_sorted.insert(0, ['Player', 'Division', 'Weekly Avg Points']) 
-    
-#     return avg_pt_rows_sorted
-
-# def split_chunks(src_list: list, chunks: int):
-#     # um...whatevs it works: https://stackoverflow.com/questions/2130016/splitting-a-list-into-n-parts-of-approximately-equal-length  
-#     # make sure to cast the output to list
-#     k, m = divmod(len(src_list), chunks) 
-#     return (src_list[i*k+min(i, m):(i+1)*k+min(i+1, m)] for i in range(chunks))
-
-
-
-
-
-
-
+    Args:
+        cfg:         Configuration object.
+        sheet_key:   Key in cfg.G_STANDINGS (e.g. 'score_sheet', 'points_sheet').
+        header_rows: List of rows to prepend before the data.
+        data_rows:   List of data rows to write.
+    """
+    g.write_gsheet_range(
+        cfg.G_SVC_CREDS_FILE,
+        {'file_id': cfg.G_STANDINGS['file_id'], 'sheet_id': cfg.G_STANDINGS[sheet_key]},
+        header_rows + data_rows,
+    )
