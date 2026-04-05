@@ -101,7 +101,7 @@ Once they pay and are assigned a division, they will automatically appear in sta
 
 ## Weekly Social Media Summary
 
-After each scoring run the utility automatically calls the Google Gemini API to write a short, enthusiastic summary of the week — winners per division, any aces, close finishes, and standings movement. The summary is saved to `temp/CCDG_2026_Summary_Week<N>.txt` for a committee member to review and post.
+After each scoring run the utility automatically calls the Google Gemini API to write a short, enthusiastic summary of the week — winners per division, any aces, close finishes, and standings movement. The summary is saved to `temp/CCDG_2026_Summary_Week<N>.txt` and, if email is configured, sent automatically to the recipients in `.env`.
 
 ### Setup
 
@@ -135,21 +135,126 @@ python ccdg_sidehatch.py
 Available options (see the `--- WEEKLY SUMMARY ---` block in `main()`):
 
 ```python
-regenerate_summary(db, exe_dir)                          # latest period
-regenerate_summary(db, exe_dir, period=5)                # specific period
-regenerate_summary(db, exe_dir, dry_run=True)            # preview prompt only, no API call
-regenerate_summary(db, exe_dir, period=5, dry_run=True)  # combine both
+regenerate_summary(db, exe_dir)                             # latest period
+regenerate_summary(db, exe_dir, period=5)                   # specific period
+regenerate_summary(db, exe_dir, dry_run=True)               # preview prompt only, no API call
+regenerate_summary(db, exe_dir, period=5, dry_run=True)     # combine both
+regenerate_summary(db, exe_dir, send_email=True)            # generate + email (same recipients as main run)
+regenerate_summary(db, exe_dir, period=5, send_email=True)  # specific period + email
 ```
 
-**Typical workflow:**
+**Typical prompt-tuning workflow:**
 1. Uncomment `regenerate_summary(db, exe_dir, dry_run=True)` and run — confirms the data Gemini receives looks right
-2. Edit `prompts/weekly_summary.txt` (tone, length, emphasis, etc.)
+2. Edit [prompts/weekly_summary.txt](prompts/weekly_summary.txt) (tone, length, emphasis, etc.)
 3. Switch to `regenerate_summary(db, exe_dir)` and run — see the generated summary
 4. Repeat until happy — the next full weekly run picks up the updated prompt automatically
+
+### Emailing the summary
+
+When `EMAIL_SENDER` and `EMAIL_RECIPIENTS` are set in `.env`, the summary is emailed automatically at the end of every weekly run — no extra steps needed. Email uses the Gmail API with OAuth2, which works with GSuite accounts that don't support App Passwords.
+
+#### One-time setup
+
+**Step 1 — Enable the Gmail API in Google Cloud Console**
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and select the project you use for this app (the same one that owns the service account).
+2. Navigate to **APIs & Services → Library**, search for **Gmail API**, and click **Enable**.
+
+**Step 2 — Create OAuth2 Desktop credentials**
+
+1. Go to **APIs & Services → Credentials** and click **+ Create Credentials → OAuth client ID**.
+2. Set application type to **Desktop app**, give it a name (e.g. `CCDG Sidehatch`), and click **Create**.
+3. Click **Download JSON** on the newly created credential.
+4. Save the downloaded file as `google_apis/gmail_oauth_client.json` in the repo root.
+   This file is gitignored and must never be committed.
+
+> **Note:** If your Google Cloud project hasn't had its OAuth consent screen configured yet, you'll be prompted to do that first. Set it to **Internal** (GSuite org only) — you don't need to publish it.
+
+**Step 3 — Configure `.env`**
+
+```
+EMAIL_SENDER=you@yourgsuite.org
+EMAIL_RECIPIENTS=committee@yourgsuite.org,another@example.com
+```
+
+Leave `GMAIL_CLIENT_SECRETS_FILE` and `GMAIL_TOKEN_FILE` commented out to use the defaults.
+
+**Step 4 — Run the one-time browser auth**
+
+Just run the main pipeline normally:
+
+```
+python ccdg__main_2026.py
+```
+
+The first time it tries to send an email a browser window will open asking you to sign in with the GSuite account in `EMAIL_SENDER` and grant the app permission to send email on your behalf. After you approve, a token file is saved to `google_apis/gmail_token.json`. **This only happens once** — all future runs use the saved token, which is refreshed automatically without any user interaction.
+
+Alternatively, you can trigger the auth flow manually via sidehatch (useful if you want to authenticate before the first scheduled run):
+
+```python
+# in ccdg_sidehatch.py main():
+regenerate_summary(db, exe_dir, send_email=True)
+```
+
+#### Disabling email
+
+Remove or blank out `EMAIL_SENDER` in `.env`. The summary will still be generated and saved to `temp/` — only the email step is skipped.
+
 
 ### Changing the Gemini model
 
 The model is set in `ccdg_settings.py` under `GEMINI_MODEL` (default: `gemini-2.0-flash`). Any model available in your Google AI Studio account can be used — see the [Gemini model docs](https://ai.google.dev/gemini-api/docs/models) for options.
+
+---
+
+## Automated Weekly Run (Windows Task Scheduler)
+
+The weekly scoring run is automated via Windows Task Scheduler. Every Monday at 3 AM Eastern the scheduler wakes the machine (if sleeping), runs [run_weekly.bat](run_weekly.bat), and goes back to sleep.
+
+### How it works
+
+[run_weekly.bat](run_weekly.bat) is a thin wrapper that sets the working directory and calls the project's virtual environment Python directly — no manual activation needed:
+
+```bat
+cd /d "d:\Code\CCDG\CCDG-Scorkeeping2026"
+".venv\Scripts\python.exe" ccdg__main_2026.py
+```
+
+All output is captured by the script's own logger and written to `logs/YYYY-MM-DD.log`.
+
+### First-time setup (or setting up on a new machine)
+
+Open **PowerShell as Administrator** (right-click → Run as administrator) and run:
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute 'd:\Code\CCDG\CCDG-Scorkeeping2026\run_weekly.bat'
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 3am
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -StartWhenAvailable -WakeToRun
+Register-ScheduledTask -TaskName 'CCDG Weekly Scoring Run' -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest -Force
+```
+
+Key options:
+- **`-StartWhenAvailable`** — if the machine was off at 3 AM, the task runs as soon as it next powers on.
+- **`-WakeToRun`** — wakes the machine from sleep at 3 AM. Requires the machine to be sleeping (not fully shut down) on Sunday nights.
+- **`-ExecutionTimeLimit 30min`** — kills the task if it hangs; a normal run completes in under 2 minutes.
+- **`-RunLevel Highest`** — runs with elevated privileges, which Task Scheduler requires to register tasks.
+
+> The trigger uses the machine's local clock. Confirm the PC is set to Eastern time with `Get-TimeZone` in PowerShell before registering.
+
+### Managing the task
+
+| Goal | Command (PowerShell) |
+|------|----------------------|
+| Run immediately (for testing) | `Start-ScheduledTask -TaskName 'CCDG Weekly Scoring Run'` |
+| Check last run status / time | `Get-ScheduledTaskInfo -TaskName 'CCDG Weekly Scoring Run'` |
+| View the task in the GUI | Open **Task Scheduler** → Task Scheduler Library → `CCDG Weekly Scoring Run` |
+| Remove the task | `Unregister-ScheduledTask -TaskName 'CCDG Weekly Scoring Run' -Confirm:$false` |
+
+### Before the first live run
+
+1. Confirm `.env` has `DEV_MODE=false`.
+2. Confirm `DEV_MODE=false` is committed or set on the machine that will run the task — the `.env` file is gitignored and not shared.
+3. Run once manually (`Start-ScheduledTask ...` or `python ccdg__main_2026.py`) and verify the standings sheet and log look correct.
 
 ---
 

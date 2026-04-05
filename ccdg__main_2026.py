@@ -80,6 +80,7 @@ def main(exe_dir: str = os.path.dirname(os.path.abspath(__file__))) -> None:
             local_xlsx_path = None
             # local_xlsx_path = r"C:\path\to\travel_round_scores.xlsx"
 
+            logger.info(f"--- Processing period {period} ---")
             period_data = ccdg_scores.get_udisc_scores(db, period, local_xlsx_path)
             if not period_data:
                 logger.warning(

@@ -124,7 +124,7 @@ def add_scores(db: Session, period: int, score_rows: list) -> None:
     for row in score_rows:
         player_id = ccdg_players.get_player_id_by_name(db, row['name'])
         if not player_id:
-            logger.warning(f"Unregistered player — skipping: {row['name']}")
+            logger.warning(f"Unregistered player — skipping: {row['name']} (period {period})")
             continue
         if _score_exists(db, player_id, period):
             continue

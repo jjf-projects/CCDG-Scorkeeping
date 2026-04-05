@@ -317,6 +317,7 @@ def regenerate_summary(
     exe_dir: str,
     period: int | None = None,
     dry_run: bool = False,
+    send_email: bool = False,
 ) -> None:
     """Re-generate a weekly social media summary using Gemini.
 
@@ -325,12 +326,14 @@ def regenerate_summary(
     weekly pipeline.
 
     Args:
-        db:       Active SQLAlchemy Session.
-        exe_dir:  Absolute path to the project root.
-        period:   Period number to summarise.  Defaults to the latest scored period.
-        dry_run:  When True, prints the formatted prompt sent to Gemini without
-                  making an API call.  Use this to check the data looks right
-                  before spending API tokens.
+        db:          Active SQLAlchemy Session.
+        exe_dir:     Absolute path to the project root.
+        period:      Period number to summarise.  Defaults to the latest scored period.
+        dry_run:     When True, prints the formatted prompt sent to Gemini without
+                     making an API call.  Use this to check the data looks right
+                     before spending API tokens.
+        send_email:  When True, emails the generated summary after saving it.
+                     Requires EMAIL_SENDER, EMAIL_PASSWORD, and EMAIL_RECIPIENTS in .env.
     """
     # Resolve period
     if period is None:
@@ -366,6 +369,10 @@ def regenerate_summary(
     print(summary)
     print("=" * 70)
     print(f"Saved to: {out_path}")
+
+    if send_email:
+        subject = f"CCDG {CONFIG.SEASON} — Week {period:02d} Summary"
+        ccdg_summary.send_summary_email(subject, summary, exe_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -475,10 +482,13 @@ def main():
         # Edit prompts/weekly_summary.txt to tweak tone, length, emphasis, etc.
         # Requires GEMINI_API_KEY in .env.
         #
-        # regenerate_summary(db, exe_dir)                          # latest period
-        # regenerate_summary(db, exe_dir, period=5)                # specific period
-        regenerate_summary(db, exe_dir, dry_run=True)            # preview prompt only, no API call
-        # regenerate_summary(db, exe_dir, period=5, dry_run=True)  # combine both
+        # regenerate_summary(db, exe_dir)                                        # latest period
+        # regenerate_summary(db, exe_dir, period=5)                              # specific period
+        regenerate_summary(db, exe_dir, dry_run=True)                          # preview prompt only, no API call
+        # regenerate_summary(db, exe_dir, period=5, dry_run=True)                # combine both
+        # regenerate_summary(db, exe_dir, send_email=True)                       # generate + email
+        # regenerate_summary(db, exe_dir, period=5, send_email=True)             # specific period + email
+        # Requires EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENTS in .env.
 
         # --- SCHEMA MIGRATION ---
         # Run this once after adding a new column to models.py on a live DB.

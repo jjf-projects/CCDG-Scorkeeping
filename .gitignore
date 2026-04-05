@@ -4,6 +4,8 @@ sql_db/*.db
 .venv/
 logs/
 google_apis/google_creds_svc_acct.json
+google_apis/gmail_oauth_client.json
+google_apis/gmail_token.json
 .env
 temp/
 

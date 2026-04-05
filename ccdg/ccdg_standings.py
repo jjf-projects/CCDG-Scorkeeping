@@ -66,17 +66,23 @@ def generate_standings(db: Session, player_registration: list[dict], cfg: object
         if p.get("Payable Status") != "paid"
     }
     if unpaid_names:
-        logger.info(f"Excluding {len(unpaid_names)} unpaid player(s) from standings.")
+        logger.info(
+            f"Excluding {len(unpaid_names)} unpaid player(s) from standings: "
+            + ", ".join(sorted(unpaid_names))
+        )
 
-    before = len(score_rows)
+    no_div_names = {r[1] for r in score_rows if r[1] not in unpaid_names and r[2] == "Unknown"}
+    if no_div_names:
+        logger.info(
+            f"Excluding {len(no_div_names)} player(s) with no division assigned yet: "
+            + ", ".join(sorted(no_div_names))
+        )
+
     score_rows = [
         r for r in score_rows
         if r[1] not in unpaid_names   # r[1] = name
         and r[2] != "Unknown"         # r[2] = division; "Unknown" means not yet assigned
     ]
-    excluded_no_div = before - len(score_rows) - len(unpaid_names)
-    if excluded_no_div > 0:
-        logger.info(f"Excluding {excluded_no_div} player(s) with no division assigned yet.")
 
     # --- Sheet 1: Scores ---
     # Strip player_id (col 0) — not for public consumption.

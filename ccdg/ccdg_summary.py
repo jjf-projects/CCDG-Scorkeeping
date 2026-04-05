@@ -17,7 +17,14 @@ Requires GEMINI_API_KEY to be set in .env.  If it is absent the function
 logs a warning and returns None — the rest of the weekly run is unaffected.
 """
 
+import base64
 import os
+from email.mime.text import MIMEText
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 from sqlalchemy import select, func, or_
 from sqlalchemy.orm import Session
 from google import genai
@@ -41,7 +48,7 @@ def generate_weekly_summary(
     cfg: object,
     registration: list[dict] | None = None,
 ) -> str | None:
-    """Generate and save a weekly social media summary for the given period.
+    """Generate, save, and optionally email a weekly social media summary.
 
     Args:
         db:           Active SQLAlchemy Session.
@@ -54,6 +61,11 @@ def generate_weekly_summary(
 
     Returns:
         The generated summary text, or None if generation was skipped or failed.
+
+    Email behaviour:
+        If EMAIL_SENDER and EMAIL_RECIPIENTS are set in .env the summary is
+        emailed automatically after saving.  Email failures are logged but do
+        not raise — the rest of the run is unaffected.
     """
     api_key = os.environ.get('GEMINI_API_KEY')
     if not api_key:
@@ -68,6 +80,11 @@ def generate_weekly_summary(
         out     = _save_summary(summary, period, exe_dir, cfg)
         logger.info(f"Weekly summary saved: {out}")
         print(f"Weekly summary saved: {out}")
+
+        if os.environ.get('EMAIL_SENDER', '').strip() and os.environ.get('EMAIL_RECIPIENTS', '').strip():
+            subject = f"CCDG {cfg.SEASON} — Week {period:02d} Summary"
+            send_summary_email(subject, summary, exe_dir)
+
         return summary
 
     except Exception as e:
@@ -314,6 +331,94 @@ def _save_summary(summary: str, period: int, exe_dir: str, cfg: object) -> str:
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write(summary)
     return out_path
+
+
+# ---------------------------------------------------------------------------
+# EMAIL
+# ---------------------------------------------------------------------------
+
+_GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.send']
+
+
+def send_summary_email(subject: str, body: str, exe_dir: str) -> None:
+    """Send the AI summary as a plain-text email via the Gmail API.
+
+    Reads settings from environment variables (.env):
+        EMAIL_SENDER              — From / sending address (your GSuite account)
+        EMAIL_RECIPIENTS          — Comma-separated To addresses
+        GMAIL_CLIENT_SECRETS_FILE — Path to OAuth2 client secrets JSON
+                                    (default: google_apis/gmail_oauth_client.json)
+        GMAIL_TOKEN_FILE          — Path where the OAuth token is cached
+                                    (default: google_apis/gmail_token.json)
+
+    On first use this opens a browser for the one-time OAuth consent flow.
+    Subsequent calls are fully automated using the saved/refreshed token.
+
+    Raises:
+        ValueError if required env vars are missing.
+        FileNotFoundError if the client secrets file is absent.
+        googleapiclient.errors.HttpError on API send failure.
+    """
+    sender     = os.environ.get('EMAIL_SENDER', '').strip()
+    recipients = [r.strip() for r in os.environ.get('EMAIL_RECIPIENTS', '').split(',') if r.strip()]
+
+    raw_token   = os.environ.get('GMAIL_TOKEN_FILE',          'google_apis/gmail_token.json')
+    raw_secrets = os.environ.get('GMAIL_CLIENT_SECRETS_FILE', 'google_apis/gmail_oauth_client.json')
+    token_path   = raw_token   if os.path.isabs(raw_token)   else os.path.join(exe_dir, raw_token)
+    secrets_path = raw_secrets if os.path.isabs(raw_secrets) else os.path.join(exe_dir, raw_secrets)
+
+    if not sender:
+        raise ValueError("EMAIL_SENDER is not set in .env — cannot send summary email.")
+    if not recipients:
+        raise ValueError("EMAIL_RECIPIENTS is not set in .env — cannot send summary email.")
+    if not os.path.exists(secrets_path):
+        raise FileNotFoundError(
+            f"Gmail OAuth client secrets not found at {secrets_path}.\n"
+            "Download an OAuth2 Desktop client JSON from Google Cloud Console and place it there.\n"
+            "See the 'Emailing the summary' section in Readme.md for step-by-step instructions."
+        )
+
+    creds   = _get_gmail_credentials(token_path, secrets_path)
+    service = build('gmail', 'v1', credentials=creds)
+
+    msg = MIMEText(body, _charset='utf-8')
+    msg['Subject'] = subject
+    msg['From']    = sender
+    msg['To']      = ', '.join(recipients)
+
+    raw_bytes = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    try:
+        service.users().messages().send(userId='me', body={'raw': raw_bytes}).execute()
+        log_msg = f"Summary email sent | to: {recipients} | subject: {subject}"
+        logger.info(log_msg)
+        print(log_msg)
+    except Exception as e:
+        log_msg = f"Summary email FAILED | to: {recipients} | subject: {subject} | error: {e}"
+        logger.error(log_msg)
+        raise
+
+
+def _get_gmail_credentials(token_path: str, client_secrets_path: str) -> Credentials:
+    """Load OAuth2 credentials from token_path, refreshing or re-authorising as needed.
+
+    On the first run (no token file) this opens a browser window for the one-time
+    OAuth consent flow and saves the resulting token to token_path.  After that,
+    the token is refreshed automatically without any user interaction.
+    """
+    creds = None
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_file(token_path, _GMAIL_SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow  = InstalledAppFlow.from_client_secrets_file(client_secrets_path, _GMAIL_SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(token_path, 'w') as f:
+            f.write(creds.to_json())
+
+    return creds
 
 
 # ---------------------------------------------------------------------------

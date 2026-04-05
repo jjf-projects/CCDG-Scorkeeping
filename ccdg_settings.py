@@ -110,11 +110,16 @@ Settings_2026_dev['DATABASE'] = {
         'DB_NAME': '2026_dev.db',
         'ECHO': True}
 Settings_2026_dev['G_STANDINGS'] = {
-        'file_id': '1D3JFjvyokhD__0jvvFb9EdWaXkL5GD53BXH62Wd9QTg',
+        'file_id': '1yoes9b3uDGWNg2C0YvwRmpbraxqYrD1GDDhXdy8tcBo',
         'score_sheet': 0,
         'points_sheet': 2139620093,
         'weekly_avg_pts': 24541006
     }
+Settings_2026_dev['G_SCHEDULE'] ={
+        'file_id': '1yoes9b3uDGWNg2C0YvwRmpbraxqYrD1GDDhXdy8tcBo',
+        'sheet_id': '505673385',
+        'range': 'A2:I'
+        }
 
 
 
