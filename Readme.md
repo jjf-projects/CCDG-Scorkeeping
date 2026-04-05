@@ -19,6 +19,7 @@ The utility runs once a week (typically Monday morning) after the Sunday play wi
    - **Scores** — raw relative score by player and period
    - **Points** — points earned per period, cycle totals, and points-after-drops
    - **Weekly Avg** — each player's average points per week played
+6. **Emails Admins an AI Summary** — shares data from the DB to a Gemini prompt to create a short summary of the week's action and emails it to admins to review and post to social media.
 
 ### Scoring Algorithm — "Percentage + Marnie"
 
