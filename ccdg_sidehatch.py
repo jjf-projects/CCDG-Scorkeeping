@@ -484,9 +484,9 @@ def main():
         #
         # regenerate_summary(db, exe_dir)                                        # latest period
         # regenerate_summary(db, exe_dir, period=5)                              # specific period
-        regenerate_summary(db, exe_dir, dry_run=True)                          # preview prompt only, no API call
+        # regenerate_summary(db, exe_dir, dry_run=True)                          # preview prompt only, no API call
         # regenerate_summary(db, exe_dir, period=5, dry_run=True)                # combine both
-        # regenerate_summary(db, exe_dir, send_email=True)                       # generate + email
+        regenerate_summary(db, exe_dir, send_email=True)                       # generate + email
         # regenerate_summary(db, exe_dir, period=5, send_email=True)             # specific period + email
         # Requires EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENTS in .env.
 

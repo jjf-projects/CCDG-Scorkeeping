@@ -411,8 +411,15 @@ def _get_gmail_credentials(token_path: str, client_secrets_path: str) -> Credent
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+            except Exception:
+                # Refresh token revoked or expired — delete the stale token and
+                # fall through to the full interactive OAuth consent flow below.
+                creds = None
+                if os.path.exists(token_path):
+                    os.remove(token_path)
+        if not creds or not creds.valid:
             flow  = InstalledAppFlow.from_client_secrets_file(client_secrets_path, _GMAIL_SCOPES)
             creds = flow.run_local_server(port=0)
         with open(token_path, 'w') as f:
